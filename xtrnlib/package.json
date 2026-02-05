@@ -1,0 +1,38 @@
+{
+	"name": "xtrn-server",
+	"version": "1.0.0",
+	"type": "module",
+	"main": "./dist/index.js",
+	"module": "./dist/index.js",
+	"types": "./dist/index.d.ts",
+	"exports": {
+		".": {
+			"import": "./dist/index.js",
+			"types": "./dist/index.d.ts"
+		}
+	},
+	"files": [
+		"dist"
+	],
+	"scripts": {
+		"build": "bun run build:clean && bun run build:bun && bun run build:types",
+		"build:clean": "rm -rf dist",
+		"build:bun": "bun build index.ts --outdir dist --target node --format esm --minify",
+		"build:types": "tsc -p tsconfig.build.json",
+		"dev": "bun run build:types --watch",
+		"prepublishOnly": "bun run build"
+	},
+	"devDependencies": {
+		"@biomejs/biome": "2.3.4",
+		"@types/bun": "latest",
+		"typescript": "^5.0.0",
+		"zod": "^4.1.12"
+	},
+	"peerDependencies": {
+		"typescript": "^5",
+		"zod": "^4.0.0"
+	},
+	"dependencies": {
+		"hono": "^4.10.4"
+	}
+}

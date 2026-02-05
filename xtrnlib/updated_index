@@ -1,0 +1,478 @@
+import type { Context as HonoContext } from "hono";
+import { Hono } from "hono";
+import * as z from "zod";
+// Import Zod v4 types and runtime
+import type * as z4 from "zod/v4/core";
+
+// OAuth config type
+export type OAuthConfig = {
+	provider: string;
+	client_id: string;
+	client_secret: string;
+	authorization_url: string;
+	token_url: string;
+	scopes: string[];
+	callback_url: string;
+};
+
+/* ---------- Config ---------- */
+export type ConfigType = {
+	userConfig?: Array<{
+		key: string;
+		type: "string" | "number" | "boolean";
+	}>;
+	oauthConfig?: OAuthConfig;
+};
+
+type TypeMap = {
+	string: string;
+	number: number;
+	boolean: boolean;
+};
+
+export function defineConfig<const T extends ConfigType>(config: T): T {
+	return config;
+}
+
+/* ---------- Helpers ---------- */
+// Extract array element type (handles both mutable and readonly arrays)
+type ArrayElement<T> = T extends readonly (infer U)[] ? U : never;
+
+// Extract user config as a proper object type using distributive mapped types
+type UserConf<T extends ConfigType> = T["userConfig"] extends readonly unknown[]
+	? {
+			[Item in ArrayElement<T["userConfig"]> as Item extends {
+				key: infer K extends string;
+			}
+				? K
+				: never]: Item extends {
+				key: string;
+				type: infer Type extends keyof TypeMap;
+			}
+				? TypeMap[Type]
+				: never;
+		}
+	: Record<string, never>;
+
+// OAuth config for context (subset of full config, excludes provider, auth_url, and scopes)
+type OAuthContextConfig = {
+	client_id: string;
+	client_secret: string;
+	token_url: string;
+	callback_url: string;
+};
+
+// Helper to infer output type from Zod v4 schema
+type InferZodOutput<S extends z4.$ZodType> = z4.infer<S>;
+
+// Response object
+export class XTRNResponse {
+	constructor(private honoCtx: HonoContext) {}
+
+	text(text: string): Response {
+		return this.honoCtx.text(text, 200);
+	}
+
+	json(data: unknown): Response {
+		return this.honoCtx.json(data, 200);
+	}
+
+	badRequestArgs(reason?: string): Response {
+		return this.honoCtx.text(reason || "", 400);
+	}
+
+	error(error: string): Response {
+		return this.honoCtx.text(error, 500);
+	}
+
+	unauthorized(): Response {
+		return this.honoCtx.text("", 401);
+	}
+}
+
+// Context type for handlers (internal, type-erased for storage)
+export type XTRNContext<T extends ConfigType> = {
+	req: unknown;
+	res: XTRNResponse;
+	config: UserConf<T>;
+} & (T["oauthConfig"] extends OAuthConfig
+	? { token: { refresh_token: string }; oauth: OAuthContextConfig }
+	: {});
+
+// Context type for handlers with schema parameters
+export type XTRNContextWithSchema<
+	T extends ConfigType,
+	S extends z4.$ZodType,
+> = {
+	req: InferZodOutput<S>;
+	res: XTRNResponse;
+	config: UserConf<T>;
+} & (T["oauthConfig"] extends OAuthConfig
+	? { token: { refresh_token: string }; oauth: OAuthContextConfig }
+	: {});
+
+// Tool definition
+type Tool<T extends ConfigType> = {
+	name: string;
+	description: string;
+	schema: z4.$ZodType;
+	handler: (ctx: XTRNContext<T>) => Promise<Response> | Response;
+};
+
+// Server details type
+type ServerDetails = {
+	name: string;
+	version: string;
+	oauth: OAuthConfig | null;
+	config: Array<{ key: string; type: "string" | "number" | "boolean" }>;
+	tools: Array<{
+		name: string;
+		description: string;
+		schema: unknown; // JSON Schema
+	}>;
+};
+
+// Check if schema is Zod v4
+function isZod4(schema: unknown): schema is z4.$ZodType {
+	return typeof schema === "object" && schema !== null && "_zod" in schema;
+}
+
+// Generate Zod v4 schema from userConfig
+function generateUserConfigSchema(
+	userConfig:
+		| Array<{ key: string; type: "string" | "number" | "boolean" }>
+		| undefined,
+): z4.$ZodObject | null {
+	if (!userConfig || userConfig.length === 0) {
+		return null;
+	}
+
+	// Build the schema shape
+	const shape: Record<string, z4.$ZodType> = {};
+	for (const field of userConfig) {
+		if (field.type === "string") {
+			shape[field.key] = z.string();
+		} else if (field.type === "number") {
+			shape[field.key] = z.number();
+		} else if (field.type === "boolean") {
+			shape[field.key] = z.boolean();
+		}
+	}
+
+	return z.object(shape) as z4.$ZodObject;
+}
+
+// Convert Zod v4 schema to JSON Schema
+async function toJSONSchema(schema: z4.$ZodType): Promise<unknown> {
+	return z.toJSONSchema(schema);
+}
+
+// XTRN Server class
+export class XTRNServer<T extends ConfigType> {
+	private app: Hono;
+	private name: string;
+	private version: string;
+	private config: T;
+	private tools: Tool<T>[] = [];
+	private userConfigSchema: z4.$ZodObject | null = null;
+	private activeRequests = 0;
+	private refuseRequests = false;
+
+	constructor(options: {
+		name: string;
+		version: string;
+		config: T;
+	}) {
+		this.app = new Hono();
+		this.name = options.name;
+		this.version = options.version;
+		this.config = options.config;
+
+		// Generate userConfig schema
+		this.initializeUserConfigSchema();
+
+		// Setup middleware for tool routes
+		this.setupToolMiddleware();
+
+		// Setup /details route
+		this.setupDetailsRoute();
+
+		// Setup /winddown route
+		this.setupWinddownRoute();
+
+		// Setup /active-requests route
+		this.setupActiveRequestsRoute();
+	}
+
+	// Initialize userConfig schema
+	private initializeUserConfigSchema(): void {
+		this.userConfigSchema = generateUserConfigSchema(this.config.userConfig);
+	}
+
+	// Setup middleware for tool routes
+	private setupToolMiddleware(): void {
+		this.app.use("/tools/*", async (c, next) => {
+			// Check if server is refusing requests
+			if (this.refuseRequests) {
+				return c.text("Server is winding down", 403);
+			}
+
+			// Increment active requests counter
+			this.activeRequests++;
+
+			try {
+				// Process the request
+				await next();
+			} finally {
+				// Always decrement counter, even if request fails
+				this.activeRequests--;
+			}
+		});
+	}
+
+	// Setup winddown route
+	private setupWinddownRoute(): void {
+		this.app.post("/wind-down", (c) => {
+			this.refuseRequests = true;
+			return c.json({
+				message: "Server is now refusing new requests",
+				activeRequests: this.activeRequests,
+			});
+		});
+	}
+
+	// Setup active requests route
+	private setupActiveRequestsRoute(): void {
+		this.app.get("/active-requests", (c) => {
+			return c.json({
+				activeRequests: this.activeRequests,
+				refusingRequests: this.refuseRequests,
+			});
+		});
+	}
+
+	// Register tool
+	registerTool<S extends z4.$ZodType>(options: {
+		name: string;
+		description: string;
+		schema: S;
+		handler: (ctx: XTRNContextWithSchema<T, S>) => Promise<Response> | Response;
+	}): void {
+		// Validate that only Zod v4 schemas are provided
+		if (!isZod4(options.schema)) {
+			throw new Error(
+				`Tool "${options.name}" must use a Zod v4 schema. Zod v3 schemas are not supported.`,
+			);
+		}
+
+		this.tools.push({
+			name: options.name,
+			description: options.description,
+			schema: options.schema,
+			handler: options.handler as (
+				ctx: XTRNContext<T>,
+			) => Promise<Response> | Response,
+		});
+
+		// Setup route for this tool
+		this.setupToolRoute(options.name, options.schema, options.handler);
+	}
+
+	// Setup tool route
+	private setupToolRoute<S extends z4.$ZodType>(
+		toolName: string,
+		schema: S,
+		handler: (ctx: XTRNContextWithSchema<T, S>) => Promise<Response> | Response,
+	): void {
+		this.app.post(`/tools/${toolName}`, async (honoCtx) => {
+			// Wrap entire route in try-catch to catch any unexpected errors
+			try {
+				// Create XTRN context - use type assertion since we'll add oauth/token conditionally
+				const xtrnCtx = {
+					req: {} as InferZodOutput<S>,
+					res: new XTRNResponse(honoCtx),
+					config: {} as UserConf<T>,
+				} as XTRNContextWithSchema<T, S>;
+
+				// Extract headers
+				const configHeader = honoCtx.req.header("X-XTRN-Config");
+				const tokenHeader = honoCtx.req.header("X-XTRN-Token");
+
+				// Decode and parse config from header
+				let userConfig: Record<string, unknown> = {};
+				if (configHeader) {
+					try {
+						userConfig = JSON.parse(atob(configHeader));
+					} catch {
+						return xtrnCtx.res.badRequestArgs(
+							"Invalid X-XTRN-Config header: must be base64-encoded JSON",
+						);
+					}
+				}
+
+				// Validate userConfig using the userConfig schema (Zod v4)
+				if (this.userConfigSchema) {
+					const userConfigResult = z.safeParse(
+						this.userConfigSchema,
+						userConfig,
+					);
+					if (!userConfigResult.success) {
+						return xtrnCtx.res.badRequestArgs(
+							`Config validation failed: ${JSON.stringify(userConfigResult.error)}`,
+						);
+					}
+					// Use validated data
+					userConfig = userConfigResult.data as Record<string, unknown>;
+				}
+
+				// Decode token from header
+				let refreshToken: string | null = null;
+				if (tokenHeader) {
+					try {
+						refreshToken = atob(tokenHeader);
+					} catch {
+						return xtrnCtx.res.badRequestArgs(
+							"Invalid X-XTRN-Token header: must be base64-encoded",
+						);
+					}
+				}
+
+				// Validate token presence if OAuth required
+				if (this.config.oauthConfig && !refreshToken) {
+					return xtrnCtx.res.badRequestArgs(
+						"X-XTRN-Token header is required for OAuth-enabled servers",
+					);
+				}
+
+				// Parse request body - now pure tool params only
+				let body: unknown;
+				try {
+					body = await honoCtx.req.json();
+				} catch {
+					return xtrnCtx.res.badRequestArgs("Invalid JSON body");
+				}
+
+				// Validate tool parameters against schema (Zod v4)
+				const result = z.safeParse(schema, body);
+				if (!result.success) {
+					return xtrnCtx.res.badRequestArgs(
+						`Tool params validation failed: ${JSON.stringify(result.error)}`,
+					);
+				}
+
+				// Build context
+				xtrnCtx.req = result.data as InferZodOutput<S>;
+				xtrnCtx.config = userConfig as UserConf<T>;
+
+				// Add token and oauth to context if oauthConfig is provided
+				if (this.config.oauthConfig) {
+					(
+						xtrnCtx as XTRNContextWithSchema<T, S> & {
+							token: { refresh_token: string };
+							oauth: OAuthContextConfig;
+						}
+					).token = { refresh_token: refreshToken! };
+
+					(
+						xtrnCtx as XTRNContextWithSchema<T, S> & {
+							oauth: OAuthContextConfig;
+						}
+					).oauth = {
+						client_id: this.config.oauthConfig.client_id,
+						client_secret: this.config.oauthConfig.client_secret,
+						token_url: this.config.oauthConfig.token_url,
+						callback_url: this.config.oauthConfig.callback_url,
+					};
+				}
+
+				// Execute handler
+				return await handler(xtrnCtx);
+			} catch (error) {
+				// Catch any error from the entire route and return as error response
+				const errorResponse = new XTRNResponse(honoCtx);
+				return errorResponse.error(
+					error instanceof Error ? error.message : String(error),
+				);
+			}
+		});
+	}
+
+	// Setup /details route
+	private setupDetailsRoute(): void {
+		this.app.get("/details", async (honoCtx) => {
+			const details: ServerDetails = {
+				name: this.name,
+				version: this.version,
+				oauth: this.config.oauthConfig || null,
+				config: this.config.userConfig || [],
+				tools: await Promise.all(
+					this.tools.map(async (tool) => ({
+						name: tool.name,
+						description: tool.description,
+						schema: await toJSONSchema(tool.schema),
+					})),
+				),
+			};
+
+			return honoCtx.json(details);
+		});
+	}
+
+	getApp(): Hono {
+		return this.app;
+	}
+
+	fetch(request: Request): Promise<Response> {
+		return Promise.resolve(this.app.fetch(request));
+	}
+
+	// Get the number of active requests
+	getActiveRequests(): number {
+		return this.activeRequests;
+	}
+
+	// Check if server is refusing requests
+	isRefusingRequests(): boolean {
+		return this.refuseRequests;
+	}
+
+	// Run the server using Bun.listen to open a socket, then Bun.serve
+	run(options?: { port?: number }): void {
+		let hostname = "localhost";
+		let port: number;
+
+		if (options?.port) {
+			// Use specified port directly
+			port = options.port;
+		} else {
+			// Open a socket to get a random port
+			const socket = Bun.listen({
+				hostname: "localhost",
+				port: 0, // Bind to a random available port
+				socket: {
+					data() {},
+					open() {},
+					close() {},
+					drain() {},
+					error() {},
+				},
+			});
+
+			hostname = socket.hostname;
+			port = socket.port;
+
+			// Stop the socket listener since we'll use Bun.serve instead
+			socket.stop();
+		}
+
+		// Print the address info
+		console.log(`http://${hostname}:${port}`);
+
+		// Serve using Bun.serve with the port
+		Bun.serve({
+			hostname,
+			port,
+			fetch: this.app.fetch.bind(this.app),
+		});
+	}
+}
