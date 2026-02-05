@@ -1,0 +1,49 @@
+name: Migrate Server to Database
+
+on:
+  workflow_dispatch:
+    inputs:
+      sprite_url:
+        description: 'Sprite URL from deploy workflow'
+        required: true
+        type: string
+      first_deploy:
+        description: 'Is this the first deployment of this server?'
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  migrate:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Checkout xtrn-prod
+        uses: actions/checkout@v4
+        with:
+          repository: AbhinavPalacharla/xtrn
+          path: xtrn-prod
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+
+      - name: Build migratecli
+        run: |
+          cd xtrn-prod/backend
+          go build -o migratecli ./cmd/migratecli/
+
+      - name: Run migration
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          cd xtrn-prod/backend
+          ./migratecli --url "${{ inputs.sprite_url }}" ${{ inputs.first_deploy && '--first-deploy' || '' }}
+
+      - name: Verify migration
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          echo "Migration completed successfully"
+          echo "Sprite URL: ${{ inputs.sprite_url }}"
