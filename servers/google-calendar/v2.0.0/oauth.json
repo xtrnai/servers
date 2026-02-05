@@ -1,0 +1,9 @@
+{
+  "provider": "google-calendar",
+  "client_id": "",
+  "client_secret": "",
+  "authorization_url": "https://accounts.google.com/o/oauth2/v2/auth",
+  "token_url": "https://oauth2.googleapis.com/token",
+  "scopes": ["email", "profile", "https://www.googleapis.com/auth/calendar"],
+  "callback_url": ""
+}
