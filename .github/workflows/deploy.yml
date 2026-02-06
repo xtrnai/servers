@@ -22,7 +22,7 @@ jobs:
       - name: Checkout xtrn-prod (for deploycli + xtrnlib)
         uses: actions/checkout@v4
         with:
-          repository: AbhinavPalacharla/xtrn-prod
+          repository: AbhinavPalacharla/xtrn
           token: ${{ secrets.XTRN_REPO_TOKEN }}
           path: xtrn-prod
           ref: race-cond-redesign
