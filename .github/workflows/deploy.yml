@@ -11,37 +11,21 @@ on:
         description: 'Server version (e.g., v2.0.0)'
         required: true
         type: string
-      oauth_client_id:
-        description: 'OAuth Client ID (optional)'
-        required: false
-        type: string
-      oauth_client_secret:
-        description: 'OAuth Client Secret (optional)'
-        required: false
-        type: string
-      oauth_callback_url:
-        description: 'OAuth Callback URL (optional)'
-        required: false
-        type: string
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    outputs:
-      sprite-url: ${{ steps.deploy.outputs.sprite-url }}
     steps:
       - name: Checkout xtrn-servers
         uses: actions/checkout@v4
-        with:
-          path: xtrn-servers
 
-      - name: Checkout xtrn-prod (for deploycli)
+      - name: Checkout xtrn-prod (for deploycli + xtrnlib)
         uses: actions/checkout@v4
         with:
-          repository: AbhinavPalacharla/xtrn
-          ref: race-cond-redesign
+          repository: AbhinavPalacharla/xtrn-prod
+          token: ${{ secrets.XTRN_PROD_PAT }}
           path: xtrn-prod
-          token: ${{ secrets.XTRN_REPO_TOKEN }}
+          ref: race-cond-redesign
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v1
@@ -51,85 +35,59 @@ jobs:
         with:
           go-version: '1.23'
 
-      - name: Setup jq
-        uses: dcarbone/install-jq-action@v2
-
-      - name: Build and link xtrnlib
+      - name: Build xtrnlib (from xtrn-prod)
         run: |
-          cd xtrn-servers/xtrnlib
+          cd xtrn-prod/backend/xtrnlib
           bun install
           bun run build
           bun link
 
-      - name: Install server dependencies
+      - name: Copy server source to xtrn-prod structure
         run: |
-          cd xtrn-servers/servers/${{ inputs.slug }}/${{ inputs.version }}
-          bun link xtrn-server
-          bun install
-
-      - name: Inject OAuth credentials
-        if: inputs.oauth_client_id != ''
-        run: |
-          cd xtrn-servers/servers/${{ inputs.slug }}/${{ inputs.version }}
-          jq --arg cid "${{ inputs.oauth_client_id }}" \
-             --arg cs "${{ inputs.oauth_client_secret }}" \
-             --arg cb "${{ inputs.oauth_callback_url }}" \
-             '.client_id=$cid | .client_secret=$cs | .callback_url=$cb' \
-             oauth.json > tmp.json && mv tmp.json oauth.json
-
-      - name: Setup deploycli directory structure
-        run: |
-          # deploycli expects servers in xtrnservers/slug/version
-          mkdir -p xtrn-prod/backend/xtrnservers/${{ inputs.slug }}
-          cp -r xtrn-servers/servers/${{ inputs.slug }}/${{ inputs.version }} \
-                xtrn-prod/backend/xtrnservers/${{ inputs.slug }}/${{ inputs.version }}
-          # Install dependencies in the copied directory (deploycli compiles from here)
+          # deploycli expects: xtrnservers/slug/version/
+          mkdir -p xtrn-prod/backend/xtrnservers/${{ inputs.slug }}/${{ inputs.version }}
+          cp -r servers/${{ inputs.slug }}/${{ inputs.version }}/* \
+                xtrn-prod/backend/xtrnservers/${{ inputs.slug }}/${{ inputs.version }}/
+          
+          # Link xtrnlib in the server directory
           cd xtrn-prod/backend/xtrnservers/${{ inputs.slug }}/${{ inputs.version }}
           bun link xtrn-server
           bun install
-
-      - name: Build deploycli
-        run: |
-          cd xtrn-prod/backend
-          go build -o deploycli ./cmd/deploycli/
-
-      - name: Cleanup existing Sprite (if any)
-        env:
-          SPRITE_TOKEN: ${{ secrets.SPRITE_TOKEN }}
-        run: |
-          cd xtrn-prod/backend
-          echo "Attempting to destroy existing Sprite (may not exist)..."
-          ./deploycli --server=${{ inputs.slug }} --version=${{ inputs.version }} --destroy 2>&1 || true
 
       - name: Deploy to Sprite
         id: deploy
         env:
           SPRITE_TOKEN: ${{ secrets.SPRITE_TOKEN }}
+        working-directory: xtrn-prod/backend
         run: |
-          cd xtrn-prod/backend
-          OUTPUT=$(./deploycli --server=${{ inputs.slug }} --version=${{ inputs.version }} 2>&1 | tee /dev/stderr)
-          URL=$(echo "$OUTPUT" | grep '^DEPLOY_URL=' | sed 's/^DEPLOY_URL=//')
-          if [ -z "$URL" ]; then
-            echo "Failed to extract URL from deploycli output"
+          # Build and run deploycli
+          go build -o deploycli ./cmd/deploycli
+          
+          OUTPUT=$(./deploycli --server=${{ inputs.slug }} --version=${{ inputs.version }} 2>&1) || true
+          echo "$OUTPUT"
+          
+          # Extract URL from DEPLOY_URL= line
+          SPRITE_URL=$(echo "$OUTPUT" | grep "^DEPLOY_URL=" | cut -d= -f2)
+          
+          if [ -z "$SPRITE_URL" ]; then
+            echo "::error::Failed to extract DEPLOY_URL from output"
             exit 1
           fi
-          echo "sprite-url=$URL" >> $GITHUB_OUTPUT
-          echo "Deployed to: $URL"
+          
+          echo "sprite-url=$SPRITE_URL" >> $GITHUB_OUTPUT
+          echo "DEPLOY_URL=$SPRITE_URL"
 
-      - name: Health check
-        env:
-          SPRITE_TOKEN: ${{ secrets.SPRITE_TOKEN }}
+      - name: Summary
         run: |
-          SPRITE_URL="${{ steps.deploy.outputs.sprite-url }}"
-          echo "Checking $SPRITE_URL/details"
-          for i in {1..30}; do
-            if curl -sf -H "Authorization: Bearer $SPRITE_TOKEN" "$SPRITE_URL/details" > /dev/null; then
-              echo "Health check passed (attempt $i/30)"
-              curl -s -H "Authorization: Bearer $SPRITE_TOKEN" "$SPRITE_URL/details" | jq .
-              exit 0
-            fi
-            echo "Attempt $i/30 failed, retrying in 2s..."
-            sleep 2
-          done
-          echo "Health check failed after 30 attempts"
-          exit 1
+          echo "## 🚀 Deployment Complete" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Field | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Server | \`${{ inputs.slug }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Version | \`${{ inputs.version }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| URL | ${{ steps.deploy.outputs.sprite-url }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Register in local DB" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
+          echo "cd backend && make sprite-register URL=${{ steps.deploy.outputs.sprite-url }}" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
