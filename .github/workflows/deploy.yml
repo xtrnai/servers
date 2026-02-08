@@ -1,42 +1,50 @@
-name: Deploy Server to Sprite
+name: Deploy Server to Cloudflare Workers
 
 on:
-  workflow_dispatch:
-    inputs:
-      slug:
-        description: 'Server slug (e.g., google-calendar)'
-        required: true
-        type: string
-      version:
-        description: 'Server version (e.g., v2.0.0)'
-        required: true
-        type: string
-      oauth_client_id:
-        description: 'OAuth Client ID (optional)'
-        required: false
-        type: string
-      oauth_client_secret:
-        description: 'OAuth Client Secret (optional)'
-        required: false
-        type: string
-      oauth_callback_url:
-        description: 'OAuth Callback URL (optional)'
-        required: false
-        type: string
+  workflow_run:
+    workflows: ["Validate Server Submission"]
+    types:
+      - completed
+    branches:
+      - main
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
     outputs:
-      sprite-url: ${{ steps.deploy.outputs.sprite-url }}
+      worker-url: ${{ steps.output-url.outputs.worker-url }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v1
 
-      - name: Setup jq
-        uses: dcarbone/install-jq-action@v2
+      - name: Detect changed servers
+        id: detect
+        run: |
+          # Get changed files from the triggering workflow
+          CHANGED_FILES=$(git diff --name-only ${{ github.event.workflow_run.head_sha }}~1 ${{ github.event.workflow_run.head_sha }})
+          
+          # Extract slug and version from changed server paths
+          SERVER_PATH=$(echo "$CHANGED_FILES" | grep '^servers/' | head -n1)
+          
+          if [ -z "$SERVER_PATH" ]; then
+            echo "No server changes detected"
+            exit 1
+          fi
+          
+          SLUG=$(echo "$SERVER_PATH" | cut -d'/' -f2)
+          VERSION=$(echo "$SERVER_PATH" | cut -d'/' -f3)
+          
+          echo "slug=$SLUG" >> $GITHUB_OUTPUT
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Detected server: $SLUG $VERSION"
 
       - name: Link xtrnlib
         run: |
@@ -46,38 +54,89 @@ jobs:
 
       - name: Install dependencies
         run: |
-          cd servers/${{ inputs.slug }}/${{ inputs.version }}
+          cd servers/${{ steps.detect.outputs.slug }}/${{ steps.detect.outputs.version }}
           bun link xtrn-server
           bun install
 
-      - name: Inject OAuth credentials
-        if: inputs.oauth_client_id != ''
+      - name: Bundle with esbuild
         run: |
-          cd servers/${{ inputs.slug }}/${{ inputs.version }}
-          jq --arg cid "${{ inputs.oauth_client_id }}" \
-             --arg cs "${{ inputs.oauth_client_secret }}" \
-             --arg cb "${{ inputs.oauth_callback_url }}" \
-             '.client_id=$cid | .client_secret=$cs | .callback_url=$cb' \
-             oauth.json > tmp.json && mv tmp.json oauth.json
+          cd servers/${{ steps.detect.outputs.slug }}/${{ steps.detect.outputs.version }}
+          bun build index.ts \
+            --target=node \
+            --format=esm \
+            --outfile=worker.js \
+            --external=node:* \
+            --external=cloudflare:*
 
-      - name: Compile server
+      - name: Generate wrangler.toml
         run: |
-          cd servers/${{ inputs.slug }}/${{ inputs.version }}
-          bun build --compile --target=bun-linux-x64 index.ts --outfile server
+          cd servers/${{ steps.detect.outputs.slug }}/${{ steps.detect.outputs.version }}
+          
+          # Convert version dots to dashes (v2.0.0 -> v2-0-0)
+          VERSION_DASHED=$(echo "${{ steps.detect.outputs.version }}" | tr '.' '-')
+          WORKER_NAME="xtrn-${{ steps.detect.outputs.slug }}-${VERSION_DASHED}"
+          
+          cat > wrangler.toml <<EOF
+          name = "${WORKER_NAME}"
+          main = "worker.js"
+          compatibility_date = "2025-01-01"
+          compatibility_flags = ["nodejs_compat"]
+          
+          [vars]
+          OAUTH_CLIENT_ID = ""
+          OAUTH_CLIENT_SECRET = ""
+          OAUTH_CALLBACK_URL = ""
+          EOF
+          
+          echo "Generated wrangler.toml for worker: $WORKER_NAME"
+          cat wrangler.toml
 
-      - name: Deploy to Sprite
+      - name: Deploy to Cloudflare Workers
         id: deploy
         env:
-          SPRITE_TOKEN: ${{ secrets.SPRITE_TOKEN }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
-          # TODO: Implement Sprite deployment
-          # For now, output a placeholder URL
-          echo "sprite-url=https://xtrn-${{ inputs.slug }}-${{ inputs.version }}.sprites.app" >> $GITHUB_OUTPUT
-          echo "Deployed to Sprite (placeholder)"
+          cd servers/${{ steps.detect.outputs.slug }}/${{ steps.detect.outputs.version }}
+          npx wrangler deploy --config wrangler.toml
 
       - name: Health check
+        id: health
         run: |
-          SPRITE_URL="${{ steps.deploy.outputs.sprite-url }}"
-          echo "Checking $SPRITE_URL/details"
-          # TODO: Implement actual health check once deployment is real
-          echo "Health check passed (placeholder)"
+          cd servers/${{ steps.detect.outputs.slug }}/${{ steps.detect.outputs.version }}
+          
+          # Extract worker name from wrangler.toml
+          WORKER_NAME=$(grep '^name = ' wrangler.toml | cut -d'"' -f2)
+          WORKER_URL="https://${WORKER_NAME}.workers.dev"
+          
+          echo "Checking $WORKER_URL/details"
+          
+          # Wait a few seconds for deployment to propagate
+          sleep 5
+          
+          # Health check with retry
+          MAX_RETRIES=5
+          RETRY_COUNT=0
+          
+          while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
+            if curl -f -s "$WORKER_URL/details" > /dev/null; then
+              echo "Health check passed!"
+              echo "worker-url=$WORKER_URL" >> $GITHUB_OUTPUT
+              exit 0
+            fi
+            
+            RETRY_COUNT=$((RETRY_COUNT + 1))
+            echo "Health check attempt $RETRY_COUNT failed, retrying..."
+            sleep 3
+          done
+          
+          echo "Health check failed after $MAX_RETRIES attempts"
+          exit 1
+
+      - name: Output Worker URL
+        id: output-url
+        run: |
+          WORKER_URL="${{ steps.health.outputs.worker-url }}"
+          echo "worker-url=$WORKER_URL" >> $GITHUB_OUTPUT
+          echo "✅ Deployed to: $WORKER_URL"
+          echo "📋 Server: ${{ steps.detect.outputs.slug }} ${{ steps.detect.outputs.version }}"
