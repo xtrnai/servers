@@ -6,6 +6,6 @@
 		"dev": "bun run index.ts"
 	},
 	"dependencies": {
-		"xtrn-server": "*"
+		"xtrn-server": "link:xtrn-server"
 	}
 }
