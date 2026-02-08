@@ -47,7 +47,7 @@ jobs:
                   fi
                   
                    # Build and link xtrnlib
-                   cd xtrnlib && bun run build && bun link && cd ..
+                   cd xtrnlib && bun install && bun run build && bun link && cd ..
                    cd "$version_dir" && bun link xtrn-server && bun install
                   
                   # Bundle with esbuild for Cloudflare Workers
