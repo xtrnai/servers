@@ -106,7 +106,7 @@ jobs:
           cd servers/${{ steps.detect.outputs.slug }}/${{ steps.detect.outputs.version }}
           
           # Extract worker name from wrangler.toml
-          WORKER_NAME=$(grep '^name = ' wrangler.toml | cut -d'"' -f2)
+          WORKER_NAME=$(grep '^name = ' wrangler.toml | head -1 | cut -d'"' -f2)
           WORKER_URL="https://${WORKER_NAME}.workers.dev"
           
           echo "Checking $WORKER_URL/details"
