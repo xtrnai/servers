@@ -17,7 +17,7 @@ const server = new XTRNServer({
 
 server.registerTool({
 	name: "echo",
-	description: "Echoes back the input with server context and configuration",
+	description: "Echoes back the input with server context",
 	schema: z.object({
 		message: z.string().describe("Message to echo"),
 		uppercase: z.boolean().optional().describe("Return in uppercase"),
