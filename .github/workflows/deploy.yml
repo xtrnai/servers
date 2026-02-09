@@ -65,7 +65,7 @@ jobs:
         run: |
           cd servers/${{ steps.detect.outputs.slug }}/${{ steps.detect.outputs.version }}
           echo 'export { XTRNState } from "xtrn-server"; export { default } from "./index.ts";' > _cf_entry.ts
-          npx esbuild _cf_entry.ts \
+          bunx esbuild _cf_entry.ts \
             --bundle \
             --format=esm \
             --platform=neutral \
@@ -98,7 +98,7 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
           cd servers/${{ steps.detect.outputs.slug }}/${{ steps.detect.outputs.version }}
-          npx wrangler deploy --config wrangler.toml
+          bunx wrangler deploy --config wrangler.toml
 
       - name: Health check
         id: health
