@@ -25,7 +25,9 @@ server.registerTool({
 	}),
 	handler: async (ctx) => {
 		if (ctx.req.sleep && ctx.req.sleep > 0) {
-			await new Promise((resolve) => setTimeout(resolve, ctx.req.sleep * 1000));
+			await new Promise((resolve) =>
+				setTimeout(resolve, ctx.req.sleep * 1000),
+			);
 		}
 
 		const msg = ctx.req.uppercase
