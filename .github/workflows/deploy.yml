@@ -59,8 +59,8 @@ jobs:
       - name: Install dependencies
         run: |
           cd servers/${{ steps.detect.outputs.slug }}/${{ steps.detect.outputs.version }}
-          bun link xtrn-server
           bun install
+          bun link xtrn-server
 
       - name: Bundle with esbuild
         run: |
