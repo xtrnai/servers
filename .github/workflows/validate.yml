@@ -4,12 +4,6 @@ on:
   pull_request:
     paths:
       - 'servers/**'
-  push:
-    branches:
-      - main
-    paths:
-      - 'servers/**'
-  workflow_dispatch:
 
 jobs:
   validate:
@@ -52,18 +46,20 @@ jobs:
                     exit 1
                   fi
                   
-                   # Build and link xtrnlib
-                   cd xtrnlib && bun install && bun run build && bun link && cd ..
-                   cd "$version_dir" && bun link xtrn-server && bun install
+                  # Link xtrnlib
+                  cd xtrnlib && bun link && cd ..
+                  cd "$version_dir" && bun link xtrn-server && bun install
                   
-                  # Bundle with esbuild for Cloudflare Workers
+                  # Bundle with esbuild for Cloudflare Workers (virtual entry re-exports XTRNState DO)
                   echo "Building bundle with esbuild..."
-                  bunx esbuild index.ts \
+                  echo 'export { XTRNState } from "xtrn-server"; export { default } from "./index.ts";' > _cf_entry.ts
+                  bunx esbuild _cf_entry.ts \
                     --bundle \
                     --format=esm \
                     --platform=neutral \
                     --target=es2020 \
                     --outfile=dist/worker.mjs \
+                    --external:cloudflare:workers \
                     --external:assert \
                     --external:buffer \
                     --external:child_process \
@@ -104,10 +100,43 @@ jobs:
                     --external:node:url \
                     --external:node:util \
                     --external:node:zlib || exit 1
+                  rm -f _cf_entry.ts
                   
-                   # Smoke test with Miniflare
-                   echo "Running Miniflare smoke test..."
-                   bun run --eval 'import { Miniflare } from "miniflare"; import { readFileSync } from "fs"; const mf = new Miniflare({ modules: true, script: readFileSync("./dist/worker.mjs", "utf-8"), compatibilityDate: "2025-01-01", compatibilityFlags: ["nodejs_compat"] }); try { const response = await mf.dispatchFetch("http://localhost/details"); const data = await response.json(); if (!data.name || !data.version) { console.error("ERROR: /details response missing name or version fields"); console.error("Response:", data); process.exit(1); } console.log("✓ Smoke test passed:", data.name, data.version); process.exit(0); } catch (error) { console.error("ERROR: Smoke test failed:", error.message); process.exit(1); } finally { await mf.dispose(); }' || exit 1
+                  # Smoke test with Miniflare
+                  echo "Running Miniflare smoke test..."
+                  cat > miniflare-test.mjs << 'MINIFLARE_EOF'
+                  import { Miniflare } from 'miniflare';
+                  import { readFileSync } from 'fs';
+                  
+                  const mf = new Miniflare({
+                    modules: true,
+                    script: readFileSync('./dist/worker.mjs', 'utf-8'),
+                    compatibilityDate: '2025-01-01',
+                    compatibilityFlags: ['nodejs_compat'],
+                    durableObjects: { XTRN_STATE: 'XTRNState' },
+                  });
+                  
+                  try {
+                    const response = await mf.dispatchFetch('http://localhost/details');
+                    const data = await response.json();
+                    
+                    if (!data.name || !data.version) {
+                      console.error('ERROR: /details response missing name or version fields');
+                      console.error('Response:', data);
+                      process.exit(1);
+                    }
+                    
+                    console.log('✓ Smoke test passed:', data.name, data.version);
+                    process.exit(0);
+                  } catch (error) {
+                    console.error('ERROR: Smoke test failed:', error.message);
+                    process.exit(1);
+                  } finally {
+                    await mf.dispose();
+                  }
+                  MINIFLARE_EOF
+                  
+                  bun run miniflare-test.mjs || exit 1
                   
                   cd ../..
                 fi

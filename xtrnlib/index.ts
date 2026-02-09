@@ -1,9 +1,64 @@
+import { DurableObject } from "cloudflare:workers";
 import type { Context as HonoContext } from "hono";
 import { Hono } from "hono";
 import { env } from "hono/adapter";
 import * as z from "zod";
 // Import Zod v4 types and runtime
 import type * as z4 from "zod/v4/core";
+
+/** @internal */
+interface XTRNEnv extends Record<string, unknown> {
+	XTRN_STATE: DurableObjectNamespace<XTRNState>;
+}
+
+/** @internal */
+export class XTRNState extends DurableObject<XTRNEnv> {
+	private activeRequests = 0;
+	private refuseRequests = false;
+
+	constructor(ctx: DurableObjectState, env: XTRNEnv) {
+		super(ctx, env);
+		this.ctx.blockConcurrencyWhile(async () => {
+			this.refuseRequests =
+				(await this.ctx.storage.get<boolean>("refuseRequests")) || false;
+		});
+	}
+
+	async tryAcquire(): Promise<{ allowed: boolean; activeRequests: number }> {
+		if (this.refuseRequests) {
+			return { allowed: false, activeRequests: this.activeRequests };
+		}
+		this.activeRequests++;
+		return { allowed: true, activeRequests: this.activeRequests };
+	}
+
+	async release(): Promise<number> {
+		this.activeRequests = Math.max(0, this.activeRequests - 1);
+		return this.activeRequests;
+	}
+
+	async windDown(): Promise<{ activeRequests: number }> {
+		this.refuseRequests = true;
+		await this.ctx.storage.put("refuseRequests", true);
+		return { activeRequests: this.activeRequests };
+	}
+
+	async getState(): Promise<{
+		activeRequests: number;
+		refusingRequests: boolean;
+	}> {
+		return {
+			activeRequests: this.activeRequests,
+			refusingRequests: this.refuseRequests,
+		};
+	}
+
+	async reset(): Promise<void> {
+		this.activeRequests = 0;
+		this.refuseRequests = false;
+		await this.ctx.storage.delete("refuseRequests");
+	}
+}
 
 // OAuth config type — inline developer-specified fields only.
 // client_id, client_secret, callback_url come from environment variables.
@@ -198,9 +253,6 @@ export class XTRNServer<T extends ConfigType> {
 	private config: T;
 	private tools: Tool<T>[] = [];
 	private userConfigSchema: z4.$ZodObject | null = null;
-	private activeRequests = 0;
-	private refuseRequests = false;
-
 	constructor(options: {
 		name: string;
 		version: string;
@@ -225,6 +277,9 @@ export class XTRNServer<T extends ConfigType> {
 
 		// Setup /active-requests route
 		this.setupActiveRequestsRoute();
+
+		// Setup /reset route
+		this.setupResetRoute();
 	}
 
 	// Initialize userConfig schema
@@ -232,45 +287,50 @@ export class XTRNServer<T extends ConfigType> {
 		this.userConfigSchema = generateUserConfigSchema(this.config.userConfig);
 	}
 
-	// Setup middleware for tool routes
+	private getStateStub(c: HonoContext): DurableObjectStub<XTRNState> {
+		const { XTRN_STATE } = env<XTRNEnv>(c);
+		return XTRN_STATE.get(XTRN_STATE.idFromName("state"));
+	}
+
 	private setupToolMiddleware(): void {
 		this.app.use("/tools/*", async (c, next) => {
-			// Check if server is refusing requests
-			if (this.refuseRequests) {
-				return c.text("Server is winding down", 403);
+			const stub = this.getStateStub(c);
+			const { allowed } = await stub.tryAcquire();
+			if (!allowed) {
+				return c.text("Server is winding down", 503);
 			}
-
-			// Increment active requests counter
-			this.activeRequests++;
 
 			try {
-				// Process the request
 				await next();
 			} finally {
-				// Always decrement counter, even if request fails
-				this.activeRequests--;
+				await stub.release();
 			}
 		});
 	}
 
-	// Setup winddown route
 	private setupWinddownRoute(): void {
-		this.app.post("/wind-down", (c) => {
-			this.refuseRequests = true;
+		this.app.post("/wind-down", async (c) => {
+			const stub = this.getStateStub(c);
+			const { activeRequests } = await stub.windDown();
 			return c.json({
 				message: "Server is now refusing new requests",
-				activeRequests: this.activeRequests,
+				activeRequests,
 			});
 		});
 	}
 
-	// Setup active requests route
 	private setupActiveRequestsRoute(): void {
-		this.app.get("/active-requests", (c) => {
-			return c.json({
-				activeRequests: this.activeRequests,
-				refusingRequests: this.refuseRequests,
-			});
+		this.app.get("/active-requests", async (c) => {
+			const stub = this.getStateStub(c);
+			return c.json(await stub.getState());
+		});
+	}
+
+	private setupResetRoute(): void {
+		this.app.post("/reset", async (c) => {
+			const stub = this.getStateStub(c);
+			await stub.reset();
+			return c.json({ message: "State reset" });
 		});
 	}
 
@@ -472,27 +532,4 @@ export class XTRNServer<T extends ConfigType> {
 		return Promise.resolve(this.app.fetch(request, env));
 	}
 
-	// Get the number of active requests
-	getActiveRequests(): number {
-		return this.activeRequests;
-	}
-
-	// Check if server is refusing requests
-	isRefusingRequests(): boolean {
-		return this.refuseRequests;
-	}
-
-	/** @deprecated Use `export default server` instead. */
-	run(): void {
-		console.warn(
-			"[xtrn] server.run() is deprecated. Use `export default server` for CF Workers compatibility.",
-		);
-		const port = 1234;
-		console.log(`http://localhost:${port}`);
-		Bun.serve({
-			hostname: "localhost",
-			port,
-			fetch: this.app.fetch.bind(this.app),
-		});
-	}
 }

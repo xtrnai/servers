@@ -40,9 +40,17 @@ const NODE_BUILTINS = [
 	"tls", "tty", "url", "util", "zlib",
 ].flatMap((m) => [m, `node:${m}`]);
 
+const CF_BUILTINS = ["cloudflare:workers"];
+
 async function bundle(entryPoint: string): Promise<string> {
+	const resolveDir = path.dirname(entryPoint);
+	const entryFile = path.basename(entryPoint);
 	const result = await esbuild.build({
-		entryPoints: [entryPoint],
+		stdin: {
+			contents: `export { XTRNState } from "xtrn-server";\nexport { default } from "./${entryFile}";`,
+			resolveDir,
+			loader: "ts",
+		},
 		bundle: true,
 		platform: "neutral",
 		format: "esm",
@@ -51,7 +59,7 @@ async function bundle(entryPoint: string): Promise<string> {
 		sourcemap: "inline",
 		mainFields: ["module", "main"],
 		conditions: ["worker", "browser", "import"],
-		external: NODE_BUILTINS,
+		external: [...NODE_BUILTINS, ...CF_BUILTINS],
 	});
 
 	return new TextDecoder().decode(result.outputFiles![0]!.contents);
@@ -69,6 +77,7 @@ async function startMiniflare(
 		port,
 		compatibilityDate: "2025-01-01",
 		compatibilityFlags: ["nodejs_compat"],
+		durableObjects: { XTRN_STATE: "XTRNState" },
 	});
 	await mf.ready;
 	return mf;
@@ -81,7 +90,7 @@ function printServerInfo(port: number, entryPoint: string): void {
 	console.log(`\n[xtrn dev] ${parent}/${base}`);
 	console.log(`  Entry:  ${entryPoint}`);
 	console.log(`  Server: http://localhost:${port}`);
-	console.log(`  Routes: GET /details, POST /tools/*\n`);
+	console.log(`  Routes: GET /details, POST /tools/*, POST /wind-down, GET /active-requests\n`);
 }
 
 async function main(): Promise<void> {
@@ -117,6 +126,7 @@ async function main(): Promise<void> {
 				port,
 				compatibilityDate: "2025-01-01",
 				compatibilityFlags: ["nodejs_compat"],
+				durableObjects: { XTRN_STATE: "XTRNState" },
 			});
 			console.log("[xtrn dev] Reloaded");
 		} catch (err) {

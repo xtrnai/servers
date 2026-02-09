@@ -63,12 +63,23 @@ jobs:
       - name: Bundle with esbuild
         run: |
           cd servers/${{ steps.detect.outputs.slug }}/${{ steps.detect.outputs.version }}
-          bun build index.ts \
-            --target=node \
+          echo 'export { XTRNState } from "xtrn-server"; export { default } from "./index.ts";' > _cf_entry.ts
+          npx esbuild _cf_entry.ts \
+            --bundle \
             --format=esm \
+            --platform=neutral \
+            --target=es2020 \
             --outfile=worker.js \
-            --external=node:* \
-            --external=cloudflare:*
+            --external:cloudflare:workers \
+            --external:assert --external:buffer --external:child_process --external:crypto \
+            --external:events --external:fs --external:http --external:http2 --external:https \
+            --external:net --external:os --external:path --external:process --external:querystring \
+            --external:stream --external:tls --external:tty --external:url --external:util --external:zlib \
+            --external:node:assert --external:node:buffer --external:node:child_process --external:node:crypto \
+            --external:node:events --external:node:fs --external:node:http --external:node:http2 --external:node:https \
+            --external:node:net --external:node:os --external:node:path --external:node:process --external:node:querystring \
+            --external:node:stream --external:node:tls --external:node:tty --external:node:url --external:node:util --external:node:zlib
+          rm -f _cf_entry.ts
 
       - name: Generate wrangler.toml
         run: |
@@ -88,6 +99,14 @@ jobs:
           OAUTH_CLIENT_ID = ""
           OAUTH_CLIENT_SECRET = ""
           OAUTH_CALLBACK_URL = ""
+
+          [[durable_objects.bindings]]
+          name = "XTRN_STATE"
+          class_name = "XTRNState"
+
+          [[migrations]]
+          tag = "v1"
+          new_sqlite_classes = ["XTRNState"]
           EOF
           
           echo "Generated wrangler.toml for worker: $WORKER_NAME"
