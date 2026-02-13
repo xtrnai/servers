@@ -1,4 +1,4 @@
-import { defineConfig, ToolTag, XTRNServer } from "xtrn-server";
+import { defineConfig, ToolTag, XTRNServer } from "xtrn/server";
 import { z } from "zod";
 
 const server = new XTRNServer({

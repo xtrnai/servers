@@ -4,7 +4,7 @@
 	"type": "module",
 	"private": true,
 	"dependencies": {
-		"xtrn-server": "link:../../../xtrnlib",
+		"xtrn": "^1.0.0",
 		"zod": "^4.1.12"
 	},
 	"devDependencies": {

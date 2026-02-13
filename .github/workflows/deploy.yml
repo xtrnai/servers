@@ -48,46 +48,18 @@ jobs:
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           echo "Detected server: $SLUG $VERSION"
 
-      - name: Build and link xtrnlib
-        run: |
-          cd xtrnlib
-          bun install
-          bun run build
-          bun link
-          cd ..
-
       - name: Install dependencies
         run: |
           cd servers/${{ steps.detect.outputs.slug }}/${{ steps.detect.outputs.version }}
-          bun link xtrn-server
+          bun install
 
-      - name: Bundle with esbuild
-        run: |
-          cd servers/${{ steps.detect.outputs.slug }}/${{ steps.detect.outputs.version }}
-          echo 'export { XTRNState } from "xtrn-server"; export { default } from "./index.ts";' > _cf_entry.ts
-          bunx esbuild _cf_entry.ts \
-            --bundle \
-            --format=esm \
-            --platform=neutral \
-            --target=es2020 \
-            --outfile=worker.js \
-            --external:cloudflare:workers \
-            --external:assert --external:buffer --external:child_process --external:crypto \
-            --external:events --external:fs --external:http --external:http2 --external:https \
-            --external:net --external:os --external:path --external:process --external:querystring \
-            --external:stream --external:tls --external:tty --external:url --external:util --external:zlib \
-            --external:node:assert --external:node:buffer --external:node:child_process --external:node:crypto \
-            --external:node:events --external:node:fs --external:node:http --external:node:http2 --external:node:https \
-            --external:node:net --external:node:os --external:node:path --external:node:process --external:node:querystring \
-            --external:node:stream --external:node:tls --external:node:tty --external:node:url --external:node:util --external:node:zlib
-          rm -f _cf_entry.ts
-
-      - name: Generate wrangler.toml
+      - name: Generate wrangler.toml and deploy entry
         run: |
           cd servers/${{ steps.detect.outputs.slug }}/${{ steps.detect.outputs.version }}
           VERSION_DASHED=$(echo "${{ steps.detect.outputs.version }}" | tr '.' '-')
           WORKER_NAME="xtrn-${{ steps.detect.outputs.slug }}-${VERSION_DASHED}"
-          printf 'name = "%s"\nmain = "worker.js"\ncompatibility_date = "2025-01-01"\ncompatibility_flags = ["nodejs_compat"]\n\n[vars]\nOAUTH_CLIENT_ID = ""\nOAUTH_CLIENT_SECRET = ""\nOAUTH_CALLBACK_URL = ""\n\n[[durable_objects.bindings]]\nname = "XTRN_STATE"\nclass_name = "XTRNState"\n\n[[migrations]]\ntag = "v1"\nnew_sqlite_classes = ["XTRNState"]\n' "$WORKER_NAME" > wrangler.toml
+          echo 'export { XTRNState } from "xtrn/server"; export { default } from "./index.ts";' > _cf_entry.ts
+          printf 'name = "%s"\nmain = "_cf_entry.ts"\ncompatibility_date = "2025-09-23"\ncompatibility_flags = ["nodejs_compat"]\n\n[vars]\nOAUTH_CLIENT_ID = ""\nOAUTH_CLIENT_SECRET = ""\nOAUTH_CALLBACK_URL = ""\n\n[[durable_objects.bindings]]\nname = "XTRN_STATE"\nclass_name = "XTRNState"\n\n[[migrations]]\ntag = "v1"\nnew_sqlite_classes = ["XTRNState"]\n' "$WORKER_NAME" > wrangler.toml
           echo "Generated wrangler.toml for worker: $WORKER_NAME"
           cat wrangler.toml
 
@@ -98,7 +70,7 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
           cd servers/${{ steps.detect.outputs.slug }}/${{ steps.detect.outputs.version }}
-          DEPLOY_OUTPUT=$(bunx wrangler deploy --config wrangler.toml 2>&1)
+          DEPLOY_OUTPUT=$(bunx wrangler deploy 2>&1)
           echo "$DEPLOY_OUTPUT"
           WORKER_URL=$(echo "$DEPLOY_OUTPUT" | grep -o 'https://[a-zA-Z0-9._-]*\.workers\.dev')
           echo "worker-url=$WORKER_URL" >> $GITHUB_OUTPUT
@@ -130,6 +102,12 @@ jobs:
           
           echo "Health check failed after $MAX_RETRIES attempts"
           exit 1
+
+      - name: Cleanup
+        if: always()
+        run: |
+          cd servers/${{ steps.detect.outputs.slug }}/${{ steps.detect.outputs.version }}
+          rm -f _cf_entry.ts wrangler.toml
 
       - name: Output Worker URL
         id: output-url

@@ -31,6 +31,11 @@ jobs:
             servers:
               - 'servers/**'
 
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
       - name: Validate server structure
         if: steps.filter.outputs.servers == 'true'
         run: |
@@ -52,65 +57,31 @@ jobs:
                     exit 1
                   fi
                   
-                  cd xtrnlib && bun install && bun run build && bun link && cd ..
-                  cd "$version_dir" && bun link xtrn-server
+                   cd "$version_dir" && bun install
+                   
+                   # Generate wrangler.toml and entry for wrangler bundling
+                   echo "Bundling with wrangler..."
+                   echo 'export { XTRNState } from "xtrn/server"; export { default } from "./index.ts";' > _cf_entry.ts
+                  SLUG=$(basename "$(dirname "$version_dir")")
+                  VERSION=$(basename "$version_dir")
+                  VERSION_DASHED=$(echo "$VERSION" | tr '.' '-')
+                  WORKER_NAME="xtrn-${SLUG}-${VERSION_DASHED}"
+                  printf 'name = "%s"\nmain = "_cf_entry.ts"\ncompatibility_date = "2025-09-23"\ncompatibility_flags = ["nodejs_compat"]\n\n[vars]\nOAUTH_CLIENT_ID = ""\nOAUTH_CLIENT_SECRET = ""\nOAUTH_CALLBACK_URL = ""\n\n[[durable_objects.bindings]]\nname = "XTRN_STATE"\nclass_name = "XTRNState"\n\n[[migrations]]\ntag = "v1"\nnew_sqlite_classes = ["XTRNState"]\n' "$WORKER_NAME" > wrangler.toml
                   
-                  # Bundle with esbuild for Cloudflare Workers (virtual entry re-exports XTRNState DO)
-                  echo "Building bundle with esbuild..."
-                  echo 'export { XTRNState } from "xtrn-server"; export { default } from "./index.ts";' > _cf_entry.ts
-                  bunx esbuild _cf_entry.ts \
-                    --bundle \
-                    --format=esm \
-                    --platform=neutral \
-                    --target=es2020 \
-                    --outfile=dist/worker.mjs \
-                    --external:cloudflare:workers \
-                    --external:assert \
-                    --external:buffer \
-                    --external:child_process \
-                    --external:crypto \
-                    --external:events \
-                    --external:fs \
-                    --external:http \
-                    --external:http2 \
-                    --external:https \
-                    --external:net \
-                    --external:os \
-                    --external:path \
-                    --external:process \
-                    --external:querystring \
-                    --external:stream \
-                    --external:tls \
-                    --external:tty \
-                    --external:url \
-                    --external:util \
-                    --external:zlib \
-                    --external:node:assert \
-                    --external:node:buffer \
-                    --external:node:child_process \
-                    --external:node:crypto \
-                    --external:node:events \
-                    --external:node:fs \
-                    --external:node:http \
-                    --external:node:http2 \
-                    --external:node:https \
-                    --external:node:net \
-                    --external:node:os \
-                    --external:node:path \
-                    --external:node:process \
-                    --external:node:querystring \
-                    --external:node:stream \
-                    --external:node:tls \
-                    --external:node:tty \
-                    --external:node:url \
-                    --external:node:util \
-                    --external:node:zlib || exit 1
-                  rm -f _cf_entry.ts
+                  # Dry-run deploy to validate bundling succeeds
+                  bunx wrangler deploy --dry-run --outdir=dist || exit 1
+                  rm -f _cf_entry.ts wrangler.toml
                   
-                  # Smoke test with Miniflare
+                  # Smoke test with Miniflare using wrangler's bundled output
                   echo "Running Miniflare smoke test..."
-                  bun run --eval 'import { Miniflare } from "miniflare"; import { readFileSync } from "fs"; const mf = new Miniflare({ modules: true, script: readFileSync("./dist/worker.mjs", "utf-8"), compatibilityDate: "2025-01-01", compatibilityFlags: ["nodejs_compat"], durableObjects: { XTRN_STATE: "XTRNState" } }); try { const response = await mf.dispatchFetch("http://localhost/details"); const data = await response.json(); if (!data.name || !data.version) { console.error("ERROR: /details response missing name or version fields"); console.error("Response:", data); process.exit(1); } console.log("✓ Smoke test passed:", data.name, data.version); process.exit(0); } catch (error) { console.error("ERROR: Smoke test failed:", error.message); process.exit(1); } finally { await mf.dispose(); }' || exit 1
+                  WORKER_FILE=$(ls dist/*.js 2>/dev/null | head -n1)
+                  if [ -z "$WORKER_FILE" ]; then
+                    echo "ERROR: No bundled worker output found in dist/"
+                    exit 1
+                  fi
+                  bun run --eval "import { Miniflare } from 'miniflare'; import { readFileSync } from 'fs'; const mf = new Miniflare({ modules: true, scriptPath: '${WORKER_FILE}', compatibilityDate: '2025-09-23', compatibilityFlags: ['nodejs_compat'], durableObjects: { XTRN_STATE: 'XTRNState' } }); try { const response = await mf.dispatchFetch('http://localhost/details'); const data = await response.json(); if (!data.name || !data.version) { console.error('ERROR: /details response missing name or version fields'); console.error('Response:', data); process.exit(1); } console.log('Smoke test passed:', data.name, data.version); process.exit(0); } catch (error) { console.error('ERROR: Smoke test failed:', error.message); process.exit(1); } finally { await mf.dispose(); }" || exit 1
                   
+                  rm -rf dist
                   cd ../..
                 fi
               done
