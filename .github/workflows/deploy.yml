@@ -58,7 +58,7 @@ jobs:
           cd servers/${{ steps.detect.outputs.slug }}/${{ steps.detect.outputs.version }}
           VERSION_DASHED=$(echo "${{ steps.detect.outputs.version }}" | tr '.' '-')
           WORKER_NAME="xtrn-${{ steps.detect.outputs.slug }}-${VERSION_DASHED}"
-          echo 'export { XTRNState } from "xtrn/server"; export { default } from "./index.ts";' > _cf_entry.ts
+          echo 'export { XTRNState } from "@xtrn/server"; export { default } from "./index.ts";' > _cf_entry.ts
           printf 'name = "%s"\nmain = "_cf_entry.ts"\ncompatibility_date = "2025-09-23"\ncompatibility_flags = ["nodejs_compat"]\n\n[vars]\nOAUTH_CLIENT_ID = ""\nOAUTH_CLIENT_SECRET = ""\nOAUTH_CALLBACK_URL = ""\n\n[[durable_objects.bindings]]\nname = "XTRN_STATE"\nclass_name = "XTRNState"\n\n[[migrations]]\ntag = "v1"\nnew_sqlite_classes = ["XTRNState"]\n' "$WORKER_NAME" > wrangler.toml
           echo "Generated wrangler.toml for worker: $WORKER_NAME"
           cat wrangler.toml

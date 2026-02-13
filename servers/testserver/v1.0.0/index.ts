@@ -1,4 +1,4 @@
-import { defineConfig, ToolTag, XTRNServer } from "xtrn/server";
+import { defineConfig, ToolTag, XTRNServer } from "@xtrn/server";
 import { z } from "zod";
 
 const server = new XTRNServer({
@@ -37,8 +37,7 @@ server.registerTool({
 		return ctx.res.json({
 			echo: msg,
 			locale: ctx.config.locale,
-			hasToken: !!ctx.token.refresh_token,
-			oauthProvider: ctx.oauth.client_id ? "configured" : "missing",
+			hasToken: !!ctx.accessToken,
 		});
 	},
 });

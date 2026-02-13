@@ -61,7 +61,7 @@ jobs:
                    
                    # Generate wrangler.toml and entry for wrangler bundling
                    echo "Bundling with wrangler..."
-                   echo 'export { XTRNState } from "xtrn/server"; export { default } from "./index.ts";' > _cf_entry.ts
+                   echo 'export { XTRNState } from "@xtrn/server"; export { default } from "./index.ts";' > _cf_entry.ts
                   SLUG=$(basename "$(dirname "$version_dir")")
                   VERSION=$(basename "$version_dir")
                   VERSION_DASHED=$(echo "$VERSION" | tr '.' '-')
