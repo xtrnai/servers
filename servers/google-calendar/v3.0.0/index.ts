@@ -4,7 +4,7 @@ import {
 	defineConfig,
 	ToolTag,
 	XTRNServer,
-} from "xtrn-server";
+} from "@xtrn/server";
 import { z } from "zod";
 
 function calendarClient(accessToken: string) {
