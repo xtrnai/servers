@@ -103,16 +103,48 @@ jobs:
           echo "Health check failed after $MAX_RETRIES attempts"
           exit 1
 
-      - name: Cleanup
+      - name: Cleanup deploy artifacts
         if: always()
         run: |
           cd servers/${{ steps.detect.outputs.slug }}/${{ steps.detect.outputs.version }}
           rm -f _cf_entry.ts wrangler.toml
 
-      - name: Output Worker URL
-        id: output-url
+      - name: Detect first deploy
+        id: first-deploy
         run: |
+          if git show HEAD~1:servers/${{ steps.detect.outputs.slug }}/${{ steps.detect.outputs.version }}/index.ts > /dev/null 2>&1; then
+            echo "first=false" >> $GITHUB_OUTPUT
+          else
+            echo "first=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Checkout xtrn
+        uses: actions/checkout@v4
+        with:
+          repository: AbhinavPalacharla/xtrn
+          path: xtrn
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+
+      - name: Run migration
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          cd xtrn/backend
+          go build -o migratecli ./cmd/migratecli/
           WORKER_URL="${{ steps.deploy.outputs.worker-url }}"
-          echo "worker-url=$WORKER_URL" >> $GITHUB_OUTPUT
-          echo "Deployed to: $WORKER_URL"
+          echo "Migrating ${{ steps.detect.outputs.slug }} ${{ steps.detect.outputs.version }} ($WORKER_URL)"
+          ./migratecli --url "$WORKER_URL" \
+            --oauth-client-id "${{ secrets.OAUTH_CLIENT_ID }}" \
+            --oauth-client-secret "${{ secrets.OAUTH_CLIENT_SECRET }}" \
+            --oauth-callback-url "${{ secrets.OAUTH_CALLBACK_URL }}" \
+            ${{ steps.first-deploy.outputs.first == 'true' && '--first-deploy' || '' }}
+
+      - name: Output Worker URL
+        run: |
+          echo "Deployed to: ${{ steps.deploy.outputs.worker-url }}"
           echo "Server: ${{ steps.detect.outputs.slug }} ${{ steps.detect.outputs.version }}"
+          echo "First deploy: ${{ steps.first-deploy.outputs.first }}"
