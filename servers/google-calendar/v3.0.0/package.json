@@ -1,0 +1,15 @@
+{
+	"name": "google-calendar",
+	"module": "index.ts",
+	"type": "module",
+	"private": true,
+	"dependencies": {
+		"@googleapis/calendar": "^14.2.0",
+		"google-auth-library": "^10.5.0",
+		"xtrn-server": "link:../../../xtrnlib",
+		"zod": "^4.1.12"
+	},
+	"devDependencies": {
+		"@types/bun": "latest"
+	}
+}

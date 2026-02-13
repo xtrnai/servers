@@ -1,0 +1,12 @@
+{
+	"compilerOptions": {
+		"strict": true,
+		"module": "preserve",
+		"moduleResolution": "bundler",
+		"resolveJsonModule": true,
+		"paths": {
+			"zod": ["./node_modules/zod"],
+			"zod/*": ["./node_modules/zod/*"]
+		}
+	}
+}
