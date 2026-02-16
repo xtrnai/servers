@@ -165,14 +165,15 @@ jobs:
               exit 1
             fi
             
-            # Run smoke test and capture details response
-            DETAILS_JSON=$(bun run --eval "import { Miniflare } from 'miniflare'; const mf = new Miniflare({ modules: true, scriptPath: '${WORKER_FILE}', compatibilityDate: '2025-09-23', compatibilityFlags: ['nodejs_compat'], durableObjects: { XTRN_STATE: 'XTRNState' } }); try { const response = await mf.dispatchFetch('http://localhost/details'); const data = await response.json(); if (!data.name || !data.version) { console.error('ERROR: /details response missing name or version fields'); console.error('Response:', JSON.stringify(data)); process.exit(1); } console.log(JSON.stringify(data)); process.exit(0); } catch (error) { console.error('ERROR: Smoke test failed:', error.message); process.exit(1); } finally { await mf.dispose(); }")
+            # Run smoke test and capture details response (write to file to avoid stdout noise from Miniflare)
+            bun run --eval "import { Miniflare } from 'miniflare'; import { writeFileSync } from 'node:fs'; const mf = new Miniflare({ modules: true, scriptPath: '${WORKER_FILE}', compatibilityDate: '2025-09-23', compatibilityFlags: ['nodejs_compat'], durableObjects: { XTRN_STATE: 'XTRNState' } }); try { const response = await mf.dispatchFetch('http://localhost/details'); const data = await response.json(); if (!data.name || !data.version) { console.error('ERROR: /details response missing name or version fields'); console.error('Response:', JSON.stringify(data)); process.exit(1); } writeFileSync('/tmp/details.json', JSON.stringify(data)); process.exit(0); } catch (error) { console.error('ERROR: Smoke test failed:', error.message); process.exit(1); } finally { await mf.dispose(); }"
             
             if [ $? -ne 0 ]; then
               echo "validation_error=Smoke test failed" >> $GITHUB_OUTPUT
               exit 1
             fi
             
+            DETAILS_JSON=$(cat /tmp/details.json)
             echo "Smoke test passed"
             
             # Cross-validate /details response
