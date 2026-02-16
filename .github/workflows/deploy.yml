@@ -109,42 +109,122 @@ jobs:
           cd servers/${{ steps.detect.outputs.slug }}/${{ steps.detect.outputs.version }}
           rm -f _cf_entry.ts wrangler.toml
 
-      - name: Detect first deploy
-        id: first-deploy
+      - name: Detect first deploy and fetch details
+        id: deploy-info
         run: |
-          if git show HEAD~1:servers/${{ steps.detect.outputs.slug }}/${{ steps.detect.outputs.version }}/index.ts > /dev/null 2>&1; then
-            echo "first=false" >> $GITHUB_OUTPUT
-          else
-            echo "first=true" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Checkout xtrn
-        uses: actions/checkout@v4
-        with:
-          repository: AbhinavPalacharla/xtrn
-          path: xtrn
-
-      - name: Setup Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: '1.23'
-
-      - name: Run migration
-        env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
-        run: |
-          cd xtrn/backend
-          go build -o migratecli ./cmd/migratecli/
+          SLUG="${{ steps.detect.outputs.slug }}"
+          VERSION="${{ steps.detect.outputs.version }}"
           WORKER_URL="${{ steps.deploy.outputs.worker-url }}"
-          echo "Migrating ${{ steps.detect.outputs.slug }} ${{ steps.detect.outputs.version }} ($WORKER_URL)"
-          ./migratecli --url "$WORKER_URL" \
-            --oauth-client-id "${{ secrets.OAUTH_CLIENT_ID }}" \
-            --oauth-client-secret "${{ secrets.OAUTH_CLIENT_SECRET }}" \
-            --oauth-callback-url "${{ secrets.OAUTH_CALLBACK_URL }}" \
-            ${{ steps.first-deploy.outputs.first == 'true' && '--first-deploy' || '' }}
+          
+          # Check if other versions exist for this slug
+          VERSION_COUNT=$(find servers/$SLUG -maxdepth 1 -type d | grep -v "^servers/$SLUG$" | wc -l)
+          if [ "$VERSION_COUNT" -le 1 ]; then
+            FIRST_DEPLOY="true"
+            echo "first-deploy=true" >> $GITHUB_OUTPUT
+          else
+            FIRST_DEPLOY="false"
+            echo "first-deploy=false" >> $GITHUB_OUTPUT
+            # Find previous version (not current one)
+            OLD_VERSION=$(find servers/$SLUG -maxdepth 1 -type d -name "v*" | grep -v "$VERSION" | sort -V | tail -n1 | xargs basename)
+            echo "old-version=$OLD_VERSION" >> $GITHUB_OUTPUT
+          fi
+          
+          # Fetch /details from deployed Worker
+          DETAILS=$(curl -s "$WORKER_URL/details")
+          
+          # Extract fields using jq
+          NAME=$(echo "$DETAILS" | jq -r '.name')
+          TOOLS_COUNT=$(echo "$DETAILS" | jq -r '.tools | length')
+          HAS_OAUTH=$(echo "$DETAILS" | jq -r 'if .oauthConfig then "true" else "false" end')
+          OAUTH_PROVIDER=$(echo "$DETAILS" | jq -r '.oauthConfig.provider // "None"')
+          
+          echo "name=$NAME" >> $GITHUB_OUTPUT
+          echo "tools-count=$TOOLS_COUNT" >> $GITHUB_OUTPUT
+          echo "has-oauth=$HAS_OAUTH" >> $GITHUB_OUTPUT
+          echo "oauth-provider=$OAUTH_PROVIDER" >> $GITHUB_OUTPUT
+          
+          echo "Deployed: $NAME v$VERSION"
+          echo "Tools: $TOOLS_COUNT"
+          echo "OAuth: $OAUTH_PROVIDER"
+          echo "First deploy: $FIRST_DEPLOY"
 
-      - name: Output Worker URL
-        run: |
-          echo "Deployed to: ${{ steps.deploy.outputs.worker-url }}"
-          echo "Server: ${{ steps.detect.outputs.slug }} ${{ steps.detect.outputs.version }}"
-          echo "First deploy: ${{ steps.first-deploy.outputs.first }}"
+      - name: Post PR comment
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const slug = '${{ steps.detect.outputs.slug }}';
+            const version = '${{ steps.detect.outputs.version }}';
+            const workerUrl = '${{ steps.deploy.outputs.worker-url }}';
+            const name = '${{ steps.deploy-info.outputs.name }}';
+            const toolsCount = '${{ steps.deploy-info.outputs.tools-count }}';
+            const hasOauth = '${{ steps.deploy-info.outputs.has-oauth }}' === 'true';
+            const oauthProvider = '${{ steps.deploy-info.outputs.oauth-provider }}';
+            const firstDeploy = '${{ steps.deploy-info.outputs.first-deploy }}' === 'true';
+            const oldVersion = '${{ steps.deploy-info.outputs.old-version }}' || '';
+            
+            const oauthLine = hasOauth 
+              ? '**OAuth**: ' + oauthProvider + ' (credentials needed)'
+              : '**OAuth**: None';
+            
+            const deployType = firstDeploy 
+              ? '**Type**: First deploy'
+              : '**Type**: Migration from ' + oldVersion;
+            
+            const oauthInstructions = hasOauth
+              ? '\n\nFor OAuth servers:\n```\n/approve oauth_client_id=YOUR_ID oauth_client_secret=YOUR_SECRET oauth_callback_url=YOUR_URL\n```'
+              : '';
+            
+            const jsonData = JSON.stringify({
+              slug: slug,
+              version: version,
+              worker_url: workerUrl,
+              has_oauth: hasOauth,
+              first_deploy: firstDeploy
+            });
+            
+            const commentLines = [
+              '🚀 **Deployed** `' + name + '` ' + version + ' to Cloudflare Workers',
+              '',
+              '**URL**: ' + workerUrl,
+              '**Tools**: ' + toolsCount,
+              oauthLine,
+              deployType,
+              '',
+              'To approve, comment:',
+              '```',
+              '/approve',
+              '```' + oauthInstructions,
+              '',
+              'To reject and tear down:',
+              '```',
+              '/reject',
+              '```',
+              '',
+              '<!-- XTRN_DEPLOY:' + jsonData + ' -->'
+            ];
+            
+            const comment = commentLines.join('\n');
+            
+            const { data: prs } = await github.rest.pulls.list({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'all',
+              sort: 'updated',
+              direction: 'desc'
+            });
+            
+            const pr = prs.find(pr => pr.merge_commit_sha === '${{ github.event.workflow_run.head_sha }}');
+            
+            if (pr) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: pr.number,
+                body: comment
+              });
+              console.log('Posted comment to PR #' + pr.number);
+            } else {
+              console.log('No PR found for this commit');
+              console.log(comment);
+            }
