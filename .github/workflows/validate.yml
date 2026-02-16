@@ -36,56 +36,205 @@ jobs:
         with:
           node-version: '20'
 
-      - name: Validate server structure
+      - name: Get changed server directories
         if: steps.filter.outputs.servers == 'true'
+        id: changed_servers
         run: |
-          for server_dir in servers/*/; do
-            if [ -d "$server_dir" ]; then
-              for version_dir in "$server_dir"/*/; do
-                if [ -d "$version_dir" ]; then
-                  echo "Validating $version_dir"
-                  
-                  # Check index.ts exists
-                  if [ ! -f "$version_dir/index.ts" ]; then
-                    echo "ERROR: index.ts not found in $version_dir"
-                    exit 1
-                  fi
-                  
-                  # Check package.json exists and has required fields
-                  if [ ! -f "$version_dir/package.json" ]; then
-                    echo "ERROR: package.json not found in $version_dir"
-                    exit 1
-                  fi
-                  
-                   cd "$version_dir" && bun install
-                   
-                   # Generate wrangler.toml and entry for wrangler bundling
-                   echo "Bundling with wrangler..."
-                   echo 'export { XTRNState } from "@xtrn/server"; export { default } from "./index.ts";' > _cf_entry.ts
-                  SLUG=$(basename "$(dirname "$version_dir")")
-                  VERSION=$(basename "$version_dir")
-                  VERSION_DASHED=$(echo "$VERSION" | tr '.' '-')
-                  WORKER_NAME="xtrn-${SLUG}-${VERSION_DASHED}"
-                  printf 'name = "%s"\nmain = "_cf_entry.ts"\ncompatibility_date = "2025-09-23"\ncompatibility_flags = ["nodejs_compat"]\n\n[vars]\nOAUTH_CLIENT_ID = ""\nOAUTH_CLIENT_SECRET = ""\nOAUTH_CALLBACK_URL = ""\n\n[[durable_objects.bindings]]\nname = "XTRN_STATE"\nclass_name = "XTRNState"\n\n[[migrations]]\ntag = "v1"\nnew_sqlite_classes = ["XTRNState"]\n' "$WORKER_NAME" > wrangler.toml
-                  
-                  # Dry-run deploy to validate bundling succeeds
-                  bunx wrangler deploy --dry-run --outdir=dist || exit 1
-                  rm -f _cf_entry.ts wrangler.toml
-                  
-                  # Smoke test with Miniflare using wrangler's bundled output
-                  echo "Running Miniflare smoke test..."
-                  WORKER_FILE=$(ls dist/*.js 2>/dev/null | head -n1)
-                  if [ -z "$WORKER_FILE" ]; then
-                    echo "ERROR: No bundled worker output found in dist/"
-                    exit 1
-                  fi
-                  bun run --eval "import { Miniflare } from 'miniflare'; import { readFileSync } from 'fs'; const mf = new Miniflare({ modules: true, scriptPath: '${WORKER_FILE}', compatibilityDate: '2025-09-23', compatibilityFlags: ['nodejs_compat'], durableObjects: { XTRN_STATE: 'XTRNState' } }); try { const response = await mf.dispatchFetch('http://localhost/details'); const data = await response.json(); if (!data.name || !data.version) { console.error('ERROR: /details response missing name or version fields'); console.error('Response:', data); process.exit(1); } console.log('Smoke test passed:', data.name, data.version); process.exit(0); } catch (error) { console.error('ERROR: Smoke test failed:', error.message); process.exit(1); } finally { await mf.dispose(); }" || exit 1
-                  
-                  rm -rf dist
-                  cd ../..
-                fi
-              done
+          # Get list of changed server/version directories
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            CHANGED_DIRS=$(git diff --name-only origin/${{ github.base_ref }}...${{ github.sha }} | grep '^servers/' | cut -d'/' -f1-3 | sort -u)
+          else
+            CHANGED_DIRS=$(git diff --name-only HEAD~1 HEAD | grep '^servers/' | cut -d'/' -f1-3 | sort -u)
+          fi
+          
+          # Filter to only directories that exist and have index.ts
+          VALID_DIRS=""
+          for dir in $CHANGED_DIRS; do
+            if [ -d "$dir" ] && [ -f "$dir/index.ts" ]; then
+              VALID_DIRS="$VALID_DIRS $dir"
             fi
           done
           
+          echo "changed_dirs=$VALID_DIRS" >> $GITHUB_OUTPUT
+          echo "Changed server directories: $VALID_DIRS"
+
+      - name: Enforce one server per PR
+        if: steps.filter.outputs.servers == 'true'
+        run: |
+          CHANGED_DIRS="${{ steps.changed_servers.outputs.changed_dirs }}"
+          COUNT=$(echo "$CHANGED_DIRS" | wc -w | tr -d ' ')
+          
+          if [ "$COUNT" -gt 1 ]; then
+            echo "ERROR: Multiple server versions detected in this PR. Only one server+version per PR is allowed."
+            echo "Changed directories: $CHANGED_DIRS"
+            exit 1
+          fi
+          
+          if [ "$COUNT" -eq 0 ]; then
+            echo "No server directories changed, skipping validation"
+            exit 0
+          fi
+
+      - name: Validate server structure
+        if: steps.filter.outputs.servers == 'true'
+        id: validation
+        run: |
+          CHANGED_DIRS="${{ steps.changed_servers.outputs.changed_dirs }}"
+          
+          if [ -z "$CHANGED_DIRS" ]; then
+            echo "No server directories to validate"
+            exit 0
+          fi
+          
+          for version_dir in $CHANGED_DIRS; do
+            echo "Validating $version_dir"
+            
+            # Extract slug and version
+            SLUG=$(echo "$version_dir" | cut -d'/' -f2)
+            VERSION=$(echo "$version_dir" | cut -d'/' -f3)
+            
+            # Check index.ts exists
+            if [ ! -f "$version_dir/index.ts" ]; then
+              echo "ERROR: index.ts not found in $version_dir"
+              echo "validation_error=index.ts not found in $version_dir" >> $GITHUB_OUTPUT
+              exit 1
+            fi
+            
+            # Check package.json exists
+            if [ ! -f "$version_dir/package.json" ]; then
+              echo "ERROR: package.json not found in $version_dir"
+              echo "validation_error=package.json not found in $version_dir" >> $GITHUB_OUTPUT
+              exit 1
+            fi
+            
+            # Version validation
+            echo "Validating version $VERSION for server $SLUG"
+            
+            # Get all existing versions for this slug
+            EXISTING_VERSIONS=$(find "servers/$SLUG" -maxdepth 1 -type d -name 'v*' 2>/dev/null | xargs -n1 basename | sort -V || echo "")
+            
+            # Remove current version from list if it exists (for re-submissions)
+            EXISTING_VERSIONS=$(echo "$EXISTING_VERSIONS" | grep -v "^$VERSION$" || echo "")
+            
+            if [ -z "$EXISTING_VERSIONS" ]; then
+              # First version must be v1.x.x
+              if ! echo "$VERSION" | grep -qE '^v1\.[0-9]+\.[0-9]+$'; then
+                echo "ERROR: First version must start with v1 (e.g., v1.0.0). Got: $VERSION"
+                echo "validation_error=First version must start with v1 (e.g., v1.0.0). Got: $VERSION" >> $GITHUB_OUTPUT
+                exit 1
+              fi
+              echo "First version validation passed: $VERSION"
+            else
+              # Must be higher than all existing versions
+              HIGHEST_VERSION=$(echo "$EXISTING_VERSIONS" | tail -n1)
+              echo "Highest existing version: $HIGHEST_VERSION"
+              
+              # Compare versions using sort -V
+              SORTED=$(printf "%s\n%s" "$HIGHEST_VERSION" "$VERSION" | sort -V)
+              HIGHEST_AFTER_SORT=$(echo "$SORTED" | tail -n1)
+              
+              if [ "$HIGHEST_AFTER_SORT" != "$VERSION" ] || [ "$HIGHEST_VERSION" = "$VERSION" ]; then
+                echo "ERROR: Version $VERSION is not higher than existing version $HIGHEST_VERSION"
+                echo "validation_error=Version $VERSION is not higher than existing version $HIGHEST_VERSION" >> $GITHUB_OUTPUT
+                exit 1
+              fi
+              echo "Version comparison passed: $VERSION > $HIGHEST_VERSION"
+            fi
+            
+            cd "$version_dir" && bun install
+            
+            # Generate wrangler.toml and entry for wrangler bundling
+            echo "Bundling with wrangler..."
+            echo 'export { XTRNState } from "@xtrn/server"; export { default } from "./index.ts";' > _cf_entry.ts
+            VERSION_DASHED=$(echo "$VERSION" | tr '.' '-')
+            WORKER_NAME="xtrn-${SLUG}-${VERSION_DASHED}"
+            printf 'name = "%s"\nmain = "_cf_entry.ts"\ncompatibility_date = "2025-09-23"\ncompatibility_flags = ["nodejs_compat"]\n\n[vars]\nOAUTH_CLIENT_ID = ""\nOAUTH_CLIENT_SECRET = ""\nOAUTH_CALLBACK_URL = ""\n\n[[durable_objects.bindings]]\nname = "XTRN_STATE"\nclass_name = "XTRNState"\n\n[[migrations]]\ntag = "v1"\nnew_sqlite_classes = ["XTRNState"]\n' "$WORKER_NAME" > wrangler.toml
+            
+            # Dry-run deploy to validate bundling succeeds
+            bunx wrangler deploy --dry-run --outdir=dist || exit 1
+            rm -f _cf_entry.ts wrangler.toml
+            
+            # Smoke test with Miniflare using wrangler's bundled output
+            echo "Running Miniflare smoke test..."
+            WORKER_FILE=$(ls dist/*.js 2>/dev/null | head -n1)
+            if [ -z "$WORKER_FILE" ]; then
+              echo "ERROR: No bundled worker output found in dist/"
+              echo "validation_error=No bundled worker output found in dist/" >> $GITHUB_OUTPUT
+              exit 1
+            fi
+            
+            # Run smoke test and capture details response
+            DETAILS_JSON=$(bun run --eval "import { Miniflare } from 'miniflare'; const mf = new Miniflare({ modules: true, scriptPath: '${WORKER_FILE}', compatibilityDate: '2025-09-23', compatibilityFlags: ['nodejs_compat'], durableObjects: { XTRN_STATE: 'XTRNState' } }); try { const response = await mf.dispatchFetch('http://localhost/details'); const data = await response.json(); if (!data.name || !data.version) { console.error('ERROR: /details response missing name or version fields'); console.error('Response:', JSON.stringify(data)); process.exit(1); } console.log(JSON.stringify(data)); process.exit(0); } catch (error) { console.error('ERROR: Smoke test failed:', error.message); process.exit(1); } finally { await mf.dispose(); }")
+            
+            if [ $? -ne 0 ]; then
+              echo "validation_error=Smoke test failed" >> $GITHUB_OUTPUT
+              exit 1
+            fi
+            
+            echo "Smoke test passed"
+            
+            # Cross-validate /details response
+            DETAILS_NAME=$(echo "$DETAILS_JSON" | jq -r '.name')
+            DETAILS_VERSION=$(echo "$DETAILS_JSON" | jq -r '.version')
+            TOOL_COUNT=$(echo "$DETAILS_JSON" | jq '.tools | length')
+            
+            # Strip 'v' prefix from directory version for comparison
+            VERSION_NO_V="${VERSION#v}"
+            
+            if [ "$DETAILS_NAME" != "$SLUG" ]; then
+              echo "ERROR: /details name '$DETAILS_NAME' does not match directory slug '$SLUG'"
+              echo "validation_error=/details name '$DETAILS_NAME' does not match directory slug '$SLUG'" >> $GITHUB_OUTPUT
+              exit 1
+            fi
+            
+            if [ "$DETAILS_VERSION" != "$VERSION_NO_V" ]; then
+              echo "ERROR: /details version '$DETAILS_VERSION' does not match directory version '$VERSION_NO_V'"
+              echo "validation_error=/details version '$DETAILS_VERSION' does not match directory version '$VERSION_NO_V'" >> $GITHUB_OUTPUT
+              exit 1
+            fi
+            
+            echo "Cross-validation passed: name=$DETAILS_NAME, version=$DETAILS_VERSION, tools=$TOOL_COUNT"
+            
+            # Save for PR comment
+            echo "server_name=$DETAILS_NAME" >> $GITHUB_OUTPUT
+            echo "server_version=$DETAILS_VERSION" >> $GITHUB_OUTPUT
+            echo "tool_count=$TOOL_COUNT" >> $GITHUB_OUTPUT
+            
+            rm -rf dist
+            cd ../..
+          done
+          
           echo "All validations passed!"
+
+      - name: Post success comment
+        if: success() && github.event_name == 'pull_request' && steps.validation.outputs.server_name != ''
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const serverName = '${{ steps.validation.outputs.server_name }}';
+            const serverVersion = '${{ steps.validation.outputs.server_version }}';
+            const toolCount = '${{ steps.validation.outputs.tool_count }}';
+            
+            const comment = `✅ Validation passed. Server: ${serverName} v${serverVersion}, ${toolCount} tools. Merge to deploy.`;
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: comment
+            });
+
+      - name: Post failure comment
+        if: failure() && github.event_name == 'pull_request' && steps.validation.outputs.validation_error != ''
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const error = '${{ steps.validation.outputs.validation_error }}';
+            const comment = `❌ Validation failed: ${error}`;
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: comment
+            });
