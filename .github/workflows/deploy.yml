@@ -32,6 +32,25 @@ jobs:
       - name: Setup Bun
         uses: oven-sh/setup-bun@v1
 
+      - name: Download thread metadata
+        uses: actions/download-artifact@v4
+        with:
+          name: thread-metadata-${{ github.event.workflow_run.pull_requests[0].number }}
+          path: /tmp/thread-metadata
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+        continue-on-error: true
+
+      - name: Read thread metadata
+        id: thread
+        run: |
+          if [ -f /tmp/thread-metadata/thread-metadata.json ]; then
+            THREAD_TS=$(jq -r '.thread_ts' /tmp/thread-metadata/thread-metadata.json)
+            echo "thread_ts=$THREAD_TS" >> $GITHUB_OUTPUT
+          else
+            echo "thread_ts=" >> $GITHUB_OUTPUT
+          fi
+
       - name: Detect changed servers
         id: detect
         env:
@@ -169,6 +188,7 @@ jobs:
           OAUTH_PROVIDER="${{ steps.deploy-info.outputs.oauth-provider }}"
           FIRST_DEPLOY="${{ steps.deploy-info.outputs.first-deploy }}"
           PR_NUMBER=${{ github.event.workflow_run.pull_requests[0].number }}
+          THREAD_TS="${{ steps.thread.outputs.thread_ts }}"
           
           # Create deployment payload with all metadata
           PAYLOAD=$(cat <<EOF
@@ -187,7 +207,8 @@ jobs:
               "first_deploy": $FIRST_DEPLOY,
               "name": "$NAME",
               "tools_count": "$TOOLS_COUNT",
-              "oauth_provider": "$OAUTH_PROVIDER"
+              "oauth_provider": "$OAUTH_PROVIDER",
+              "thread_ts": "$THREAD_TS"
             }
           }
           EOF
