@@ -1,0 +1,9 @@
+{
+	"name": "pingserver",
+	"version": "3.0.0",
+	"type": "module",
+	"dependencies": {
+		"@xtrn/server": "^1.0.0",
+		"zod": "^4.0.0"
+	}
+}
