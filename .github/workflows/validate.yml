@@ -197,10 +197,14 @@ jobs:
             
             echo "Cross-validation passed: name=$DETAILS_NAME, version=$DETAILS_VERSION, tools=$TOOL_COUNT"
             
-            # Save for PR comment
+            # Save for PR comment and webhook
             echo "server_name=$DETAILS_NAME" >> $GITHUB_OUTPUT
             echo "server_version=$DETAILS_VERSION" >> $GITHUB_OUTPUT
             echo "tool_count=$TOOL_COUNT" >> $GITHUB_OUTPUT
+            HAS_OAUTH=$(echo "$DETAILS_JSON" | jq -r 'if .oauth then "true" else "false" end')
+            OAUTH_PROVIDER=$(echo "$DETAILS_JSON" | jq -r '.oauth.provider // "None"')
+            echo "has_oauth=$HAS_OAUTH" >> $GITHUB_OUTPUT
+            echo "oauth_provider=$OAUTH_PROVIDER" >> $GITHUB_OUTPUT
             
             rm -rf dist
             cd ../..
@@ -208,22 +212,53 @@ jobs:
           
           echo "All validations passed!"
 
+      - name: Notify deploy-webhook
+        if: success() && github.event_name == 'pull_request' && steps.validation.outputs.server_name != ''
+        id: webhook
+        run: |
+          RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "${{ secrets.DEPLOY_WEBHOOK_URL }}/webhook/validate" \
+            -H "Authorization: Bearer ${{ secrets.WEBHOOK_SECRET }}" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "server_name": "${{ steps.validation.outputs.server_name }}",
+              "server_version": "${{ steps.validation.outputs.server_version }}",
+              "tool_count": "${{ steps.validation.outputs.tool_count }}",
+              "has_oauth": "${{ steps.validation.outputs.has_oauth }}",
+              "oauth_provider": "${{ steps.validation.outputs.oauth_provider }}",
+              "pr_number": ${{ github.event.pull_request.number }},
+              "repo": "${{ github.repository }}",
+              "pr_url": "${{ github.event.pull_request.html_url }}"
+            }')
+          HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+          BODY=$(echo "$RESPONSE" | head -n-1)
+          echo "HTTP status: $HTTP_CODE"
+          echo "Response: $BODY"
+          THREAD_TS=$(echo "$BODY" | jq -r '.thread_ts // ""')
+          echo "thread_ts=$THREAD_TS" >> $GITHUB_OUTPUT
+
+      - name: Upload thread metadata
+        if: success() && github.event_name == 'pull_request' && steps.validation.outputs.server_name != ''
+        run: |
+          mkdir -p /tmp/thread-metadata
+          echo '{"thread_ts":"${{ steps.webhook.outputs.thread_ts }}","pr_number":${{ github.event.pull_request.number }}}' > /tmp/thread-metadata/thread.json
+        shell: bash
+      - uses: actions/upload-artifact@v4
+        if: success() && github.event_name == 'pull_request' && steps.validation.outputs.server_name != ''
+        with:
+          name: thread-metadata-${{ github.event.pull_request.number }}
+          path: /tmp/thread-metadata/thread.json
+          retention-days: 1
+
       - name: Post success comment
         if: success() && github.event_name == 'pull_request' && steps.validation.outputs.server_name != ''
         uses: actions/github-script@v7
         with:
           script: |
-            const serverName = '${{ steps.validation.outputs.server_name }}';
-            const serverVersion = '${{ steps.validation.outputs.server_version }}';
-            const toolCount = '${{ steps.validation.outputs.tool_count }}';
-            
-            const comment = `✅ Validation passed. Server: ${serverName} v${serverVersion}, ${toolCount} tools. Deploy preview starting...`;
-            
             github.rest.issues.createComment({
               issue_number: context.issue.number,
               owner: context.repo.owner,
               repo: context.repo.repo,
-              body: comment
+              body: '✅ Validation passed — pending approval'
             });
 
       - name: Post failure comment
