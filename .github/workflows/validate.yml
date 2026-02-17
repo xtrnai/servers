@@ -1,11 +1,6 @@
 name: Validate Server Submission
 
 on:
-  push:
-    branches:
-      - main
-    paths:
-      - 'servers/**'
   pull_request:
     paths:
       - 'servers/**'
@@ -218,7 +213,7 @@ jobs:
             const serverVersion = '${{ steps.validation.outputs.server_version }}';
             const toolCount = '${{ steps.validation.outputs.tool_count }}';
             
-            const comment = `✅ Validation passed. Server: ${serverName} v${serverVersion}, ${toolCount} tools. Merge to deploy.`;
+            const comment = `✅ Validation passed. Server: ${serverName} v${serverVersion}, ${toolCount} tools. Deploy preview starting...`;
             
             github.rest.issues.createComment({
               issue_number: context.issue.number,

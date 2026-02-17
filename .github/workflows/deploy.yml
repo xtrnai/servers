@@ -5,19 +5,18 @@ on:
     workflows: ["Validate Server Submission"]
     types:
       - completed
-    branches:
-      - main
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    if: ${{ github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.pull_requests[0] }}
     outputs:
       worker-url: ${{ steps.output-url.outputs.worker-url }}
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 2
+          fetch-depth: 0
+          ref: ${{ github.event.workflow_run.head_sha }}
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -29,9 +28,11 @@ jobs:
 
       - name: Detect changed servers
         id: detect
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Get changed files from the triggering workflow
-          CHANGED_FILES=$(git diff --name-only ${{ github.event.workflow_run.head_sha }}~1 ${{ github.event.workflow_run.head_sha }})
+          PR_NUMBER=${{ github.event.workflow_run.pull_requests[0].number }}
+          CHANGED_FILES=$(gh api repos/${{ github.repository }}/pulls/$PR_NUMBER/files --jq '.[].filename')
           
           # Extract slug and version from changed server paths
           SERVER_PATH=$(echo "$CHANGED_FILES" | grep '^servers/' | head -n1)
@@ -141,12 +142,12 @@ jobs:
           echo "name=$NAME" >> $GITHUB_OUTPUT
           echo "tools-count=$TOOLS_COUNT" >> $GITHUB_OUTPUT
           echo "has-oauth=$HAS_OAUTH" >> $GITHUB_OUTPUT
-          echo "oauth-provider=$OAUTH_PROVIDER" >> $GITHUB_OUTPUT
-          
-          echo "Deployed: $NAME v$VERSION"
-          echo "Tools: $TOOLS_COUNT"
-          echo "OAuth: $OAUTH_PROVIDER"
-          echo "First deploy: $FIRST_DEPLOY"
+           echo "oauth-provider=$OAUTH_PROVIDER" >> $GITHUB_OUTPUT
+           
+           echo "Deployed: $NAME v$VERSION"
+           echo "Tools: $TOOLS_COUNT"
+           echo "OAuth: $OAUTH_PROVIDER"
+           echo "First deploy: $FIRST_DEPLOY"
 
       - name: Create GitHub Deployment
         id: deployment
@@ -161,6 +162,7 @@ jobs:
           HAS_OAUTH="${{ steps.deploy-info.outputs.has-oauth }}"
           OAUTH_PROVIDER="${{ steps.deploy-info.outputs.oauth-provider }}"
           FIRST_DEPLOY="${{ steps.deploy-info.outputs.first-deploy }}"
+          PR_NUMBER=${{ github.event.workflow_run.pull_requests[0].number }}
           
           # Create deployment payload with all metadata
           PAYLOAD=$(cat <<EOF
@@ -171,13 +173,14 @@ jobs:
             "auto_merge": false,
             "required_contexts": [],
             "payload": {
+              "pr_number": "$PR_NUMBER",
               "slug": "$SLUG",
               "version": "$VERSION",
               "worker_url": "$WORKER_URL",
-              "has_oauth": $HAS_OAUTH,
+              "oauth_required": $HAS_OAUTH,
               "first_deploy": $FIRST_DEPLOY,
               "name": "$NAME",
-              "tools_count": $TOOLS_COUNT,
+              "tools_count": "$TOOLS_COUNT",
               "oauth_provider": "$OAUTH_PROVIDER"
             }
           }
