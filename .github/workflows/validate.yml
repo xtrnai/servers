@@ -240,13 +240,13 @@ jobs:
         if: success() && github.event_name == 'pull_request' && steps.validation.outputs.server_name != ''
         run: |
           mkdir -p /tmp/thread-metadata
-          echo '{"thread_ts":"${{ steps.webhook.outputs.thread_ts }}","pr_number":${{ github.event.pull_request.number }}}' > /tmp/thread-metadata/thread.json
+          echo '{"thread_ts":"${{ steps.webhook.outputs.thread_ts }}","pr_number":${{ github.event.pull_request.number }}}' > /tmp/thread-metadata/thread-metadata.json
         shell: bash
       - uses: actions/upload-artifact@v4
         if: success() && github.event_name == 'pull_request' && steps.validation.outputs.server_name != ''
         with:
           name: thread-metadata-${{ github.event.pull_request.number }}
-          path: /tmp/thread-metadata/thread.json
+          path: /tmp/thread-metadata/thread-metadata.json
           retention-days: 1
 
       - name: Post success comment
