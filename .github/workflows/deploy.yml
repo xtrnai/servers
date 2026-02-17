@@ -6,6 +6,12 @@ on:
     types:
       - completed
 
+permissions:
+  deployments: write
+  contents: read
+  pull-requests: read
+  actions: read
+
 jobs:
   deploy:
     runs-on: ubuntu-latest

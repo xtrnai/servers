@@ -6,6 +6,10 @@ on:
       - 'servers/**'
   workflow_dispatch:
 
+permissions:
+  pull-requests: write
+  contents: read
+
 jobs:
   validate:
     runs-on: ubuntu-latest
