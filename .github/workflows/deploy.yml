@@ -15,33 +15,58 @@ permissions:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    if: ${{ github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.pull_requests[0] }}
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
     outputs:
       worker-url: ${{ steps.output-url.outputs.worker-url }}
     steps:
+      - name: Find PR number from head SHA
+        id: find-pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          HEAD_SHA="${{ github.event.workflow_run.head_sha }}"
+          # Search for open PRs with this head SHA
+          PR_NUMBER=$(gh api repos/${{ github.repository }}/pulls?state=open\&per_page=100 \
+            --jq ".[] | select(.head.sha == \"$HEAD_SHA\") | .number" | head -1)
+          
+          if [ -z "$PR_NUMBER" ]; then
+            echo "No open PR found for SHA $HEAD_SHA — skipping deploy"
+            echo "found=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          
+          echo "Found PR #$PR_NUMBER for SHA $HEAD_SHA"
+          echo "found=true" >> $GITHUB_OUTPUT
+          echo "number=$PR_NUMBER" >> $GITHUB_OUTPUT
+
       - uses: actions/checkout@v4
+        if: steps.find-pr.outputs.found == 'true'
         with:
           fetch-depth: 0
           ref: ${{ github.event.workflow_run.head_sha }}
 
       - name: Setup Node.js
+        if: steps.find-pr.outputs.found == 'true'
         uses: actions/setup-node@v4
         with:
           node-version: '20'
 
       - name: Setup Bun
+        if: steps.find-pr.outputs.found == 'true'
         uses: oven-sh/setup-bun@v1
 
       - name: Download thread metadata
+        if: steps.find-pr.outputs.found == 'true'
         uses: actions/download-artifact@v4
         with:
-          name: thread-metadata-${{ github.event.workflow_run.pull_requests[0].number }}
+          name: thread-metadata-${{ steps.find-pr.outputs.number }}
           path: /tmp/thread-metadata
           run-id: ${{ github.event.workflow_run.id }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
         continue-on-error: true
 
       - name: Read thread metadata
+        if: steps.find-pr.outputs.found == 'true'
         id: thread
         run: |
           if [ -f /tmp/thread-metadata/thread-metadata.json ]; then
@@ -52,11 +77,12 @@ jobs:
           fi
 
       - name: Detect changed servers
+        if: steps.find-pr.outputs.found == 'true'
         id: detect
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          PR_NUMBER=${{ github.event.workflow_run.pull_requests[0].number }}
+          PR_NUMBER=${{ steps.find-pr.outputs.number }}
           CHANGED_FILES=$(gh api repos/${{ github.repository }}/pulls/$PR_NUMBER/files --jq '.[].filename')
           
           # Extract slug and version from changed server paths
@@ -75,11 +101,13 @@ jobs:
           echo "Detected server: $SLUG $VERSION"
 
       - name: Install dependencies
+        if: steps.find-pr.outputs.found == 'true'
         run: |
           cd servers/${{ steps.detect.outputs.slug }}/${{ steps.detect.outputs.version }}
           bun install
 
       - name: Generate wrangler.toml and deploy entry
+        if: steps.find-pr.outputs.found == 'true'
         run: |
           cd servers/${{ steps.detect.outputs.slug }}/${{ steps.detect.outputs.version }}
           VERSION_DASHED=$(echo "${{ steps.detect.outputs.version }}" | tr '.' '-')
@@ -90,6 +118,7 @@ jobs:
           cat wrangler.toml
 
       - name: Deploy to Cloudflare Workers
+        if: steps.find-pr.outputs.found == 'true'
         id: deploy
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
@@ -102,6 +131,7 @@ jobs:
           echo "worker-url=$WORKER_URL" >> $GITHUB_OUTPUT
 
       - name: Health check
+        if: steps.find-pr.outputs.found == 'true'
         id: health
         run: |
           WORKER_URL="${{ steps.deploy.outputs.worker-url }}"
@@ -130,12 +160,13 @@ jobs:
           exit 1
 
       - name: Cleanup deploy artifacts
-        if: always()
+        if: always() && steps.find-pr.outputs.found == 'true'
         run: |
           cd servers/${{ steps.detect.outputs.slug }}/${{ steps.detect.outputs.version }}
           rm -f _cf_entry.ts wrangler.toml
 
       - name: Detect first deploy and fetch details
+        if: steps.find-pr.outputs.found == 'true'
         id: deploy-info
         run: |
           SLUG="${{ steps.detect.outputs.slug }}"
@@ -180,6 +211,7 @@ jobs:
           echo "First deploy: $FIRST_DEPLOY"
 
       - name: Create GitHub Deployment
+        if: steps.find-pr.outputs.found == 'true'
         id: deployment
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -194,7 +226,7 @@ jobs:
           REQUIRED_ENV_COUNT="${{ steps.deploy-info.outputs.required-env-count }}"
           HAS_REQUIRED_ENV="${{ steps.deploy-info.outputs.has-required-env }}"
           FIRST_DEPLOY="${{ steps.deploy-info.outputs.first-deploy }}"
-          PR_NUMBER=${{ github.event.workflow_run.pull_requests[0].number }}
+          PR_NUMBER=${{ steps.find-pr.outputs.number }}
           THREAD_TS="${{ steps.thread.outputs.thread_ts }}"
           
           # Create deployment payload with all metadata
@@ -231,6 +263,7 @@ jobs:
           echo "Created deployment: $DEPLOY_ID"
 
       - name: Create deployment status
+        if: steps.find-pr.outputs.found == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
