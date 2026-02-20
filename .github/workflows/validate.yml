@@ -241,6 +241,7 @@ jobs:
       - name: Notify deploy-webhook
         if: success() && github.event_name == 'pull_request' && steps.validation.outputs.server_name != ''
         id: webhook
+        continue-on-error: true
         run: |
           RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "${{ secrets.DEPLOY_WEBHOOK_URL }}/webhook/validate" \
             -H "Authorization: Bearer ${{ secrets.WEBHOOK_SECRET }}" \
