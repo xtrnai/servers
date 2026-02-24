@@ -1,0 +1,23 @@
+{
+	"name": "google-maps",
+	"version": "1.1.0",
+	"module": "index.ts",
+	"type": "module",
+	"private": true,
+	"scripts": {
+		"dev": "xtrn dev",
+		"submit": "xtrn submit"
+	},
+	"dependencies": {
+		"@googlemaps/google-maps-services-js": "^3.4.2",
+		"@xtrn/server": "^1.0.0",
+		"zod": "^4.0.0"
+	},
+	"devDependencies": {
+		"@types/bun": "latest",
+		"@xtrn/cli": "^1.0.0"
+	},
+	"peerDependencies": {
+		"typescript": "^5"
+	}
+}
